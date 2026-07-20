@@ -1,0 +1,11 @@
+# Build output
+build/
+Compile/
+
+# IDE
+.vs/
+.vscode/
+out/
+
+# vcpkg
+vcpkg_installed/

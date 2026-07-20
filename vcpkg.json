@@ -1,0 +1,19 @@
+{
+  "name": "betterweaponscrappingf4se",
+  "version-string": "1.0.0",
+  "dependencies": [
+    "boost-stl-interfaces",
+    "boost-iostreams",
+    "boost-iterator",
+    "boost-predef",
+    "fmt",
+    "frozen",
+    "rsm-mmio",
+    "spdlog",
+    "xbyak",
+    {
+      "name": "imgui",
+      "features": ["dx11-binding", "win32-binding"]
+    }
+  ]
+}
