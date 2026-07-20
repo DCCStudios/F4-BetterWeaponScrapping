@@ -92,6 +92,17 @@ namespace
 
 		ImGuiMCP::Separator();
 		ImGuiMCP::TextUnformatted("UI mode");
+		bool nativeGrant = s.useNativeGrant.load();
+		if (ImGuiMCP::Checkbox("Native scrap pipeline (picker before confirm)", &nativeGrant)) {
+			s.useNativeGrant.store(nativeGrant);
+			s.Save();
+		}
+		if (ImGuiMCP::IsItemHovered()) {
+			ImGuiMCP::SetTooltip(
+				"When on, pressing Scrap on a weapon opens the recovery picker FIRST; your selections are added "
+				"to the game's own scrap confirmation and granted by the game itself. "
+				"When off, the picker appears after the vanilla scrap and items are added directly (legacy).");
+		}
 		bool native = s.nativeUIOnly.load();
 		if (ImGuiMCP::Checkbox("Native UI Only", &native)) {
 			s.nativeUIOnly.store(native);
@@ -131,35 +142,9 @@ namespace
 			ImGuiMCP::SetTooltip("Default 71 (0x47) = letter G. See WinUser.h VK_* constants.");
 		}
 
-		ImGuiMCP::Spacing();
-		ImGuiMCP::TextUnformatted("Hotkey prompt position and size");
-
-		float px = s.hotkeyPromptX.load();
-		if (ImGuiMCP::SliderFloat("Prompt X (screen fraction)", &px, 0.0f, 1.0f, "%.3f")) {
-			s.hotkeyPromptX.store(px);
-			s.Save();
-		}
-		if (ImGuiMCP::IsItemHovered()) {
-			ImGuiMCP::SetTooltip("Horizontal position of the hotkey prompt as a fraction of screen width (0 = left, 1 = right). Default 0.69.");
-		}
-
-		float py = s.hotkeyPromptY.load();
-		if (ImGuiMCP::SliderFloat("Prompt Y (screen fraction)", &py, 0.0f, 1.0f, "%.3f")) {
-			s.hotkeyPromptY.store(py);
-			s.Save();
-		}
-		if (ImGuiMCP::IsItemHovered()) {
-			ImGuiMCP::SetTooltip("Vertical position of the hotkey prompt as a fraction of screen height (0 = top, 1 = bottom). Default 0.963.");
-		}
-
-		float psc = s.hotkeyPromptScale.load();
-		if (ImGuiMCP::SliderFloat("Prompt text scale", &psc, 0.5f, 4.0f, "%.2f")) {
-			s.hotkeyPromptScale.store(psc);
-			s.Save();
-		}
-		if (ImGuiMCP::IsItemHovered()) {
-			ImGuiMCP::SetTooltip("Extra multiplier on top of resolution scaling. Default 1.4.");
-		}
+		// The SCRAP MODS prompt now lives in the game's own workbench button
+		// bar (injected SWF), so the old ImGui prompt position/scale sliders
+		// are gone — the bar lays the hint out natively.
 
 		ImGuiMCP::Spacing();
 		ImGuiMCP::TextUnformatted("Custom font");

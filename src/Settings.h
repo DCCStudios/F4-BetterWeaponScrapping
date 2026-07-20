@@ -29,6 +29,17 @@ namespace BWS
 		std::atomic<bool> nativeUIOnly{ false };
 		std::atomic<bool> debugLogging{ false };
 
+		/**
+		 * Native grant pipeline (default on): the SWF-injected ScrapItem
+		 * wrapper opens the recovery picker BEFORE the vanilla confirm, and
+		 * chosen items are appended to ExamineMenu::scrappingArray so the
+		 * game's own confirm dialog lists them and the game grants them.
+		 * Off = legacy behavior: picker appears after the vanilla scrap and
+		 * items are added via AddObjectToContainer. Also forced off at
+		 * runtime if the BuildWeaponScrappingArray detour fails to install.
+		 */
+		std::atomic<bool> useNativeGrant{ true };
+
 		/** Selective mod removal at workbench Examine menu (ImGui flow + hotkey). */
 		std::atomic<bool> enableScrapMod{ true };
 		/** Virtual-key code (e.g. 'G' = 0x47). See WinUser.h VK_* constants. */

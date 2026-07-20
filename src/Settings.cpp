@@ -164,6 +164,8 @@ namespace BWS
 				showApplyHudMessage.store(ParseBool(val, true));
 		} else if (key == "NativeUIOnly") {
 			nativeUIOnly.store(ParseBool(val, false));
+			} else if (key == "UseNativeGrant") {
+				useNativeGrant.store(ParseBool(val, true));
 			} else if (key == "DebugLogging") {
 				debugLogging.store(ParseBool(val, false));
 			} else if (key == "EnableScrapMod") {
@@ -200,6 +202,7 @@ namespace BWS
 		oss << "DefaultSelectRecipeMaterials=" << (defaultSelectRecipeMaterials.load() ? 1 : 0) << '\n';
 		oss << "ShowApplyHudMessage=" << (showApplyHudMessage.load() ? 1 : 0) << '\n';
 		oss << "NativeUIOnly=" << (nativeUIOnly.load() ? 1 : 0) << '\n';
+		oss << "UseNativeGrant=" << (useNativeGrant.load() ? 1 : 0) << '\n';
 		oss << "DebugLogging=" << (debugLogging.load() ? 1 : 0) << '\n';
 		oss << "EnableScrapMod=" << (enableScrapMod.load() ? 1 : 0) << '\n';
 		oss << "ScrapModHotkey=" << scrapModHotkey.load() << '\n';

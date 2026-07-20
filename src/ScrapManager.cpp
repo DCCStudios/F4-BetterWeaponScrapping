@@ -1,5 +1,6 @@
 #include "PCH.h"
 #include "BenchScrapTypes.h"
+#include "ExamineMenuBridge.h"
 #include "ScrapManager.h"
 #include "ScrapOverlay.h"
 #include "Settings.h"
@@ -257,6 +258,18 @@ namespace
 		if (!BWS::Settings::Get().masterEnabled.load()) {
 			if (BWS::Settings::Get().debugLogging.load()) {
 				logger::info("[BWS] scrap confirm ignored (master disabled)."sv);
+			}
+			return;
+		}
+
+		// Native grant pipeline: recovery ran BEFORE this confirm (pre-scrap
+		// picker + scrappingArray staging), and the original call above just
+		// granted everything natively. The legacy post-scrap picker must not
+		// open on top of that — it would double-grant.
+		if (BWS::ExamineMenuBridge::IsNativeGrantScrapInFlight() ||
+			(BWS::Settings::Get().useNativeGrant.load() && !BWS::Settings::Get().nativeUIOnly.load())) {
+			if (BWS::Settings::Get().debugLogging.load()) {
+				logger::info("[BWS] scrap confirm accepted (native grant pipeline; legacy queue skipped)."sv);
 			}
 			return;
 		}

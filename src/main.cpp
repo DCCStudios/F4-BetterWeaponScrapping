@@ -1,5 +1,6 @@
 #include "PCH.h"
 #include "BWSMenu.h"
+#include "ExamineMenuBridge.h"
 #include "ScrapManager.h"
 #include "ScrapOverlay.h"
 #include "ScrapModManager.h"
@@ -101,6 +102,11 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f
 
 	ScrapOverlay::Install();
 	spdlog::default_logger()->flush();
+
+	// Workbench Scaleform bridge: injects BWSExamineMenu.swf into the Examine
+	// menu (native SCRAP MODS button hint + pre-scrap ScrapItem intercept)
+	// and detours BuildWeaponScrappingArray for native component granting.
+	BWS::ExamineMenuBridge::Install();
 
 	if (!ScrapManager::Install()) {
 		logger::error("Better Weapon Scrapping: workbench scrap hook failed; mod has no effect."sv);

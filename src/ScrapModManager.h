@@ -19,4 +19,15 @@ namespace BWS::ScrapModManager
 
 	/** Immediately closes the scrap-mod flow, releasing input and menuMode. */
 	void ForceClose();
+
+	/**
+	 * True when the native "SCRAP MODS" button-bar hint should be visible:
+	 * feature enabled, ExamineMenu open on a modded weapon, no confirm dialog
+	 * and no picker already active. Polled per-frame by the injected SWF
+	 * (BWSExamineMenu.swf) via root.bws.IsHintVisible().
+	 */
+	bool ShouldShowNativeHint();
+
+	/** Opens the scrap-mod picker (button-bar hint click / external callers). */
+	void OpenPickerFromExternal();
 }

@@ -53,6 +53,8 @@ set(SOURCES
 	src/ScrapManager.cpp
 	src/ScrapOverlay.cpp
 	src/ScrapModManager.cpp
+	src/ExamineMenuBridge.cpp
+	DetourXS/detourxs.cpp
 )
 
 set(HEADERS
@@ -63,7 +65,9 @@ set(HEADERS
 	src/ScrapManager.h
 	src/ScrapOverlay.h
 	src/ScrapModManager.h
+	src/ExamineMenuBridge.h
 	src/BWS_RendererData.h
+	DetourXS/detourxs.h
 )
 
 add_library(${PROJECT_NAME} SHARED ${SOURCES} ${HEADERS})
@@ -83,6 +87,10 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 	"${CMAKE_CURRENT_SOURCE_DIR}/../F4SE-Menu-Framework-3/resources"
 )
 
+# detourxs.h pulls in LDE64x64 via `#pragma comment(lib, "DetourXS/LDE64x64")`;
+# make that relative path resolvable from the project root.
+target_link_directories(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
 target_link_libraries(${PROJECT_NAME} PRIVATE
 	CommonLibF4::CommonLibF4
 	spdlog::spdlog
@@ -92,6 +100,9 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 )
 
 target_precompile_headers(${PROJECT_NAME} PRIVATE src/PCH.h)
+
+# Vendored third-party code: keep our F4SE precompiled header out of it.
+set_source_files_properties(DetourXS/detourxs.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 
 if(MSVC)
 	target_compile_options(${PROJECT_NAME} PRIVATE

@@ -1,5 +1,6 @@
 #include "PCH.h"
 #include "ScrapOverlay.h"
+#include "ExamineMenuBridge.h"
 #include "ScrapModManager.h"
 #include "Settings.h"
 #include "BWS_RendererData.h"
@@ -174,6 +175,11 @@ namespace
 	PendingWeaponScrap    g_active{};
 	std::vector<std::uint8_t> g_modSelected;
 	bool                  g_recipeSelected{ false };
+	// True while the picker is running in pre-scrap mode: it was opened by the
+	// SWF ScrapItem intercept BEFORE the vanilla scrap. Apply then stages the
+	// selection into the native scrappingArray pipeline and re-invokes the
+	// vanilla scrap, instead of adding items to the player afterwards.
+	bool                  g_preScrapMode{ false };
 
 	struct IngredientEntry
 	{
@@ -324,9 +330,12 @@ namespace
 		auto pending = std::move(g_pendingQueue.front());
 		g_pendingQueue.pop_front();
 
-		if (BWS::Settings::Get().nativeUIOnly.load()) {
+		// Pre-scrap requests always use the ImGui picker: the SWF intercept
+		// only fires when nativeUIOnly is off (see OnScrapRequestedFunc).
+		if (BWS::Settings::Get().nativeUIOnly.load() && !pending.preScrap) {
 			ShowNativeMessageBox(std::move(pending));
 		} else {
+			g_preScrapMode = pending.preScrap;
 			g_active = std::move(pending);
 			PrecomputeModRecipes(g_active);
 			const auto defMod = BWS::Settings::Get().defaultSelectAllMods.load() ? 1 : 0;
@@ -346,6 +355,7 @@ namespace
 		g_modSelected.clear();
 		g_modRecipes.clear();
 		g_recipeSelected = false;
+		g_preScrapMode = false;
 		BlockGameInput(false);
 		PopWorldPause();
 	}
@@ -423,7 +433,10 @@ namespace
 		}
 	}
 
-	static void GiveScrapComponentsForMod(RE::PlayerCharacter* a_player, const PendingModPick& a_pick, bool a_dbg)
+	// Appends the COBJ scrap components for one mod pick to a_out (no player
+	// mutation). Shared by the legacy "grant now" path and the pre-scrap
+	// staging path.
+	static void CollectScrapComponentsForMod(const PendingModPick& a_pick, std::vector<DeferredItem>& a_out, bool a_dbg)
 	{
 		auto* mod = RE::TESForm::GetFormByID<RE::BGSMod::Attachment::Mod>(a_pick.formID);
 		if (!mod) {
@@ -450,18 +463,19 @@ namespace
 		}
 
 		if (a_dbg) {
-			logger::info("[BWS] ScrapParts: {:08X} '{}' -> COBJ {:08X}, giving ingredients"sv,
+			logger::info("[BWS] ScrapParts: {:08X} '{}' -> COBJ {:08X}, collecting ingredients"sv,
 				a_pick.formID, a_pick.label,
 				static_cast<std::uint32_t>(cobj->GetFormID()));
 		}
 
-		auto items = std::make_shared<std::vector<DeferredItem>>();
 		for (const auto& tup : *cobj->requiredItems) {
 			auto* form = tup.first;
 			const auto qty = tup.second.i;
 			if (!form || qty == 0) {
 				continue;
 			}
+			// BGSComponent ingredients are granted as their scrap MISC item,
+			// matching what the vanilla scrap pipeline lists and grants.
 			RE::TESBoundObject* toAdd = nullptr;
 			if (auto* comp = form->As<RE::BGSComponent>(); comp && comp->scrapItem) {
 				toAdd = comp->scrapItem;
@@ -471,7 +485,7 @@ namespace
 			if (!toAdd) {
 				continue;
 			}
-			items->push_back(DeferredItem{
+			a_out.push_back(DeferredItem{
 				static_cast<std::uint32_t>(toAdd->GetFormID()),
 				static_cast<std::int32_t>(qty)
 			});
@@ -481,6 +495,12 @@ namespace
 					static_cast<std::uint32_t>(form->GetFormID()));
 			}
 		}
+	}
+
+	static void GiveScrapComponentsForMod(RE::PlayerCharacter*, const PendingModPick& a_pick, bool a_dbg)
+	{
+		auto items = std::make_shared<std::vector<DeferredItem>>();
+		CollectScrapComponentsForMod(a_pick, *items, a_dbg);
 		DeferAddItemsToPlayer(std::move(items));
 	}
 
@@ -558,23 +578,20 @@ namespace
 		}
 	}
 
-	static void ApplyRecovery()
+	// Resolves the picker's current selection (kept mods -> loose mod items,
+	// scrapped mods -> COBJ components, optional recipe materials) into one
+	// flat item list. Used by both the legacy grant and pre-scrap staging.
+	static void CollectSelectedRecoveryItems(std::vector<DeferredItem>& a_out)
 	{
-		auto* player = RE::PlayerCharacter::GetSingleton();
-		if (!player) {
-			DismissPopup();
-			return;
-		}
-
 		const bool dbg = BWS::Settings::Get().debugLogging.load();
 		auto& loose = RE::BGSMod::Attachment::GetAllLooseMods();
-		auto items = std::make_shared<std::vector<DeferredItem>>();
 
 		for (std::size_t i = 0; i < g_active.mods.size(); ++i) {
 			const bool selected = (i < g_modSelected.size() && g_modSelected[i] != 0);
 			const auto& pick = g_active.mods[i];
 
 			if (selected) {
+				// Keep the mod: recover it as its loose MISC item.
 				auto* mod = RE::TESForm::GetFormByID<RE::BGSMod::Attachment::Mod>(pick.formID);
 				if (!mod) {
 					if (dbg) {
@@ -584,7 +601,7 @@ namespace
 				}
 				const auto it = loose.find(mod);
 				if (it != loose.end() && it->second) {
-					items->push_back(DeferredItem{
+					a_out.push_back(DeferredItem{
 						static_cast<std::uint32_t>(it->second->GetFormID()), 1
 					});
 					if (dbg) {
@@ -596,7 +613,8 @@ namespace
 					logger::info("[BWS] Recover: {:08X} '{}' -> no loose-mod item"sv, pick.formID, pick.label);
 				}
 			} else {
-				GiveScrapComponentsForMod(player, pick, dbg);
+				// Scrap the mod for parts: its COBJ ingredients.
+				CollectScrapComponentsForMod(pick, a_out, dbg);
 			}
 		}
 
@@ -609,12 +627,25 @@ namespace
 				if (!bound) {
 					continue;
 				}
-				items->push_back(DeferredItem{
+				a_out.push_back(DeferredItem{
 					static_cast<std::uint32_t>(bound->GetFormID()),
 					static_cast<std::int32_t>(line.count)
 				});
 			}
 		}
+	}
+
+	// Legacy (post-scrap) Apply: add the selection to the player directly.
+	static void ApplyRecovery()
+	{
+		auto* player = RE::PlayerCharacter::GetSingleton();
+		if (!player) {
+			DismissPopup();
+			return;
+		}
+
+		auto items = std::make_shared<std::vector<DeferredItem>>();
+		CollectSelectedRecoveryItems(*items);
 
 		if (!items->empty()) {
 			DeferAddItemsToPlayer(std::move(items));
@@ -623,6 +654,29 @@ namespace
 			RE::SendHUDMessage::ShowHUDMessage("Better Weapon Scrapping: recovery applied.", nullptr, false, false);
 		}
 		DismissPopup();
+	}
+
+	// Pre-scrap Apply: stage the selection for the BuildWeaponScrappingArray
+	// detour and let the vanilla scrap run. The native confirm dialog then
+	// lists the staged items alongside the vanilla scrap yields, and the
+	// game's own accept path grants everything (no AddObjectToContainer).
+	static void ApplyPreScrapAndInvokeVanilla()
+	{
+		std::vector<DeferredItem> items;
+		CollectSelectedRecoveryItems(items);
+
+		std::vector<RecoveryGrantItem> staged;
+		staged.reserve(items.size());
+		for (const auto& di : items) {
+			if (di.formID != 0 && di.count > 0) {
+				staged.push_back(RecoveryGrantItem{ di.formID, static_cast<std::uint32_t>(di.count) });
+			}
+		}
+
+		logger::info("[BWS] pre-scrap apply: staging {} item(s), invoking vanilla scrap"sv, staged.size());
+		BWS::ExamineMenuBridge::StageRecoveryItems(std::move(staged));
+		DismissPopup();
+		BWS::ExamineMenuBridge::InvokeVanillaScrap();
 	}
 
 	static void ScrapAllModsForParts(const PendingWeaponScrap& a_data)
@@ -841,7 +895,11 @@ namespace
 			ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
 				ImGuiWindowFlags_AlwaysAutoResize);
 
-		ImGui::TextUnformatted("Weapon Scrapped \xe2\x80\x94 Recovery Options");
+		if (g_preScrapMode) {
+			ImGui::TextUnformatted("Scrap Weapon \xe2\x80\x94 Recovery Options");
+		} else {
+			ImGui::TextUnformatted("Weapon Scrapped \xe2\x80\x94 Recovery Options");
+		}
 		ImGui::Separator();
 		ImGui::Spacing();
 		ImGui::TextWrapped("%s", g_active.weaponDisplayName.c_str());
@@ -979,12 +1037,37 @@ namespace
 		}
 
 		ImGui::Separator();
-		if (ImGui::Button("Apply", ImVec2(btnW, 0))) {
-			ApplyRecovery();
-		}
-		ImGui::SameLine();
-		if (ImGui::Button("Skip", ImVec2(btnW, 0))) {
-			DismissPopup();
+		if (g_preScrapMode) {
+			// Pre-scrap: the weapon has NOT been scrapped yet. The vanilla
+			// confirm dialog follows and shows the combined yield list.
+			if (ImGui::Button("Scrap + Recover", ImVec2(std::round(btnW * 1.4f), 0))) {
+				ApplyPreScrapAndInvokeVanilla();
+			}
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("Continue to the game's scrap confirmation with the selection above added to the yield.");
+			}
+			ImGui::SameLine();
+			if (ImGui::Button("Scrap Only", ImVec2(btnW, 0))) {
+				// Vanilla scrap with no extras staged.
+				DismissPopup();
+				BWS::ExamineMenuBridge::InvokeVanillaScrap();
+			}
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("Vanilla scrap: no loose mods or extra materials.");
+			}
+			ImGui::SameLine();
+			if (ImGui::Button("Cancel", ImVec2(btnW, 0))) {
+				// Abort entirely — the weapon is untouched.
+				DismissPopup();
+			}
+		} else {
+			if (ImGui::Button("Apply", ImVec2(btnW, 0))) {
+				ApplyRecovery();
+			}
+			ImGui::SameLine();
+			if (ImGui::Button("Skip", ImVec2(btnW, 0))) {
+				DismissPopup();
+			}
 		}
 
 		ImGui::End();
