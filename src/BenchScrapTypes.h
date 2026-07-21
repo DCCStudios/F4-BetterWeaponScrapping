@@ -62,9 +62,19 @@ static_assert(sizeof(ScrapItemCallbackLayout) == 0x18);
 // offsetof(RE::ExamineMenu, moddedInventoryItem) == 0x548 (PostNG / current CommonLibF4 layout).
 inline constexpr std::uintptr_t kExamineMenu_ModdedInventoryItem = 0x548;
 
-// offsetof(RE::ExamineMenu, scrappingArray) == 0x420 — from the same verified
-// layout (PluginTemplate/GunMover/lib/commonlibf4/include/RE/E/ExamineMenu.h)
-// that gives moddedInventoryItem == 0x548, which is confirmed working on this
-// runtime. BSTArray<BSTTuple<TESBoundObject*, uint32_t>> of (component, count)
-// pairs granted by the vanilla scrap-accept path.
-inline constexpr std::uintptr_t kExamineMenu_ScrappingArray = 0x420;
+// offsetof(RE::ExamineMenu, scrappingArray) == 0x428 on runtime 1.10.163.
+//
+// IMPORTANT: the CommonLibF4 header annotates this as 0x420, but that is WRONG
+// for old-gen and was the cause of a hard CTD. Re-derived from the actual
+// (Steamless-unpacked) Fallout4.exe by disassembling BuildWeaponScrappingArray:
+//   - scrappableItemsMap is a BSTHashMap<u32,u32> at 0x3F8 (size 0x30 ->
+//     ends 0x428). The build loop reads its _capacity at [this+0x404] and its
+//     _allocator._entries at [this+0x420]; so 0x420 is INSIDE the hashmap.
+//   - scrappingArray (BSTArray<BSTTuple<TESBoundObject*, uint32_t>>) is the
+//     next member at 0x428: the function clears it via `lea rsi,[this+0x428];
+//     mov dword [rsi+0x10], 0` (BSTArray _size at +0x10 -> 0x438) and it ends
+//     at 0x440, exactly where the header places `slotObjects`.
+// Writing to 0x420 (the old value) corrupted the hashmap's entry pointer, so
+// the *next* BuildWeaponScrappingArray iterated garbage form IDs and
+// GetFormByID returned null -> `mov edx,[rax+0x30]` on null -> crash.
+inline constexpr std::uintptr_t kExamineMenu_ScrappingArray = 0x428;
