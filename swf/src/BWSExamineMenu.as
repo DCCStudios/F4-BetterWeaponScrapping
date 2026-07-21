@@ -9,9 +9,8 @@ package
 	// Loaded into the game's workbench menu (Interface/ExamineMenu.swf) by the
 	// Better Weapon Scrapping plugin via a flash.display.Loader — the same
 	// injection pattern the F4SE Menu Framework uses for the pause menu.
-	// The plugin's native Scaleform callback (src/ExamineMenuIntegration.cpp)
-	// registers a code object on the host root as "bws" and, when possible,
-	// pre-creates a Shared.AS3.BSButtonHintData instance as "bws_hintData".
+	// The plugin's native Scaleform callback (src/ExamineMenuBridge.cpp)
+	// registers a code object on the host root as "bws".
 	//
 	// This SWF renders nothing of its own. Its jobs are:
 	//
@@ -19,17 +18,14 @@ package
 	//     bar. ExamineMenu's ButtonHintBar_mc declares SetButtonHintData as a
 	//     reassignable `public var ...:Function` (replaced by native code once
 	//     the bar is acquired), so we wrap it: every time the menu swaps hint
-	//     vectors (UpdateButtons), we push our hint into the vector before
-	//     forwarding to the original function. Clicking the hint (or pressing
-	//     the plugin hotkey) opens the plugin's scrap-mods picker.
+	//     vectors (UpdateButtons), we submit a FRESH Vector that includes our
+	//     hint (native ButtonBarMenu marshaling appears to no-op when handed
+	//     the same Vector reference again), then forward to the original.
 	//
 	//  2. Wrap BGSCodeObj.ScrapItem so the plugin can intercept the scrap
 	//     BEFORE the native confirm dialog is built. The original function is
 	//     kept as BGSCodeObj.bws_origScrapItem so the plugin can re-invoke the
-	//     vanilla scrap after the player picks recovery options; the plugin's
-	//     BuildWeaponScrappingArray hook then appends the chosen items to the
-	//     scrap results, so the native confirm lists them and the game itself
-	//     grants them.
+	//     vanilla scrap after the player picks recovery options.
 	public class BWSExamineMenu extends MovieClip
 	{
 		private var injected:Boolean = false;
@@ -42,6 +38,10 @@ package
 		// (each property write dispatches a bar redraw).
 		private var lastVisible:Boolean = false;
 		private var lastKey:String = "";
+
+		// One-shot diagnostics so we don't spam the plugin log every frame.
+		private var loggedPushOk:Boolean = false;
+		private var loggedPushFail:Boolean = false;
 
 		public function BWSExamineMenu()
 		{
@@ -68,6 +68,56 @@ package
 		{
 			// stage.getChildAt(0) is the host ExamineMenu.swf root clip.
 			return stage ? stage.getChildAt(0) : null;
+		}
+
+		private function log(msg:String):void
+		{
+			if (!bws)
+			{
+				return;
+			}
+			try
+			{
+				bws.Log(msg);
+			}
+			catch (err:Error)
+			{
+			}
+		}
+
+		// Build a BSButtonHintData in the HOST movie's application domain.
+		// Prefer getDefinitionByName over the C++-precreated root.bws_hintData:
+		// Scaleform CreateObject from native has produced an object that is
+		// "IsObject" but is rejected by Vector.<BSButtonHintData>.push (typed
+		// Vector type-check), which silently aborted our SetButtonHintData
+		// wrapper before the native forward ever ran.
+		private function createHintData():Object
+		{
+			try
+			{
+				var HintClass:Class = getDefinitionByName("Shared.AS3.BSButtonHintData") as Class;
+				var hd:Object = new HintClass(
+					"SCRAP MODS",
+					String(bws.GetHintKey()),
+					"PSN_Y",
+					"Xenon_Y",
+					1,
+					onScrapModsPressed);
+				log("BWSExamineMenu.swf: hint data created via getDefinitionByName");
+				return hd;
+			}
+			catch (err:Error)
+			{
+				log("BWSExamineMenu.swf: getDefinitionByName failed: " + err.message);
+			}
+
+			var host:Object = hostRoot();
+			var fallback:Object = host ? host["bws_hintData"] : null;
+			if (fallback)
+			{
+				log("BWSExamineMenu.swf: falling back to plugin-created hint data (may fail Vector.push)");
+			}
+			return fallback;
 		}
 
 		private function tryInject():void
@@ -103,33 +153,12 @@ package
 				return;
 			}
 
-			// --- Build the BSButtonHintData for our bar entry -------------
-			// Primary: instance pre-created by the plugin in the host movie's
-			// application domain (root.bws_hintData). Fallback: construct it
-			// ourselves — our Loader-loaded SWF's application domain is a
-			// child of the host's, so the host's class is resolvable by name.
-			hintData = host["bws_hintData"];
+			hintData = createHintData();
 			if (!hintData)
 			{
-				try
-				{
-					var HintClass:Class = getDefinitionByName("Shared.AS3.BSButtonHintData") as Class;
-					hintData = new HintClass("SCRAP MODS", String(bws.GetHintKey()), "PSN_Y", "Xenon_Y", 1, onScrapModsPressed);
-					bws.Log("BWSExamineMenu.swf: hint data created in ActionScript (getDefinitionByName)");
-				}
-				catch (err:Error)
-				{
-					hintData = null;
-				}
-			}
-			else
-			{
-				bws.Log("BWSExamineMenu.swf: using plugin-created hint data (root.bws_hintData)");
-			}
-
-			if (!hintData)
-			{
-				bws.Log("BWSExamineMenu.swf: FAILED to obtain BSButtonHintData - button hint disabled (hotkey still works)");
+				log("BWSExamineMenu.swf: FAILED to obtain BSButtonHintData - button hint disabled (hotkey still works)");
+				// Still wrap ScrapItem so the pre-scrap picker keeps working.
+				wrapScrapItem(codeObj);
 				finishInjection();
 				return;
 			}
@@ -140,21 +169,65 @@ package
 			lastKey = String(bws.GetHintKey());
 
 			// --- Wrap ButtonHintBar_mc.SetButtonHintData ------------------
-			// The menu calls this with a fresh Vector.<BSButtonHintData> on
-			// every mode change (UpdateButtons). We append our hint (once per
-			// vector — the menu reuses the same vector instances) and forward.
+			// Always forward a NEW Vector (via concat) that includes our hint.
+			// Mutating the menu's vector in place and re-submitting the same
+			// reference is not reliably remapped by the native ButtonBarMenu
+			// path; a fresh Vector forces the marshal.
 			var origSet:Function = bar.SetButtonHintData as Function;
 			var hd:Object = hintData;
+			var self:BWSExamineMenu = this;
 			bar.SetButtonHintData = function(v:*):void
 			{
-				if (v != null && v.indexOf(hd) < 0)
+				if (v == null)
 				{
-					v.push(hd);
+					origSet.call(bar, v);
+					return;
 				}
-				origSet.call(bar, v);
+				try
+				{
+					var out:* = v.concat();
+					if (out.indexOf(hd) < 0)
+					{
+						out.push(hd);
+					}
+					if (!self.loggedPushOk)
+					{
+						self.loggedPushOk = true;
+						self.log("BWSExamineMenu.swf: hint vector OK (len=" + out.length + ", visible=" + hd.ButtonVisible + ")");
+					}
+					origSet.call(bar, out);
+				}
+				catch (pushErr:Error)
+				{
+					if (!self.loggedPushFail)
+					{
+						self.loggedPushFail = true;
+						self.log("BWSExamineMenu.swf: hint vector FAILED: " + pushErr.message);
+					}
+					// Never block the vanilla bar if our append blows up.
+					origSet.call(bar, v);
+				}
 			};
 
-			// --- Wrap BGSCodeObj.ScrapItem --------------------------------
+			wrapScrapItem(codeObj);
+
+			// Force one bar rebuild so the current mode's vector flows
+			// through our wrapper immediately.
+			try
+			{
+				base.UpdateButtons();
+			}
+			catch (err3:Error)
+			{
+				log("BWSExamineMenu.swf: initial UpdateButtons failed: " + err3.message);
+			}
+
+			log("BWSExamineMenu.swf: injection complete (hint wrapper + ScrapItem wrap)");
+			finishInjection();
+		}
+
+		private function wrapScrapItem(codeObj:Object):void
+		{
 			// OnScrapRequested() returns true when the plugin opened its
 			// pre-scrap recovery picker (it will re-invoke bws_origScrapItem
 			// after the player chooses); false means proceed vanilla.
@@ -177,19 +250,6 @@ package
 					origScrap.call(codeObj);
 				}
 			};
-
-			// Force one bar rebuild so the current mode's vector flows
-			// through our wrapper immediately.
-			try
-			{
-				base.UpdateButtons();
-			}
-			catch (err3:Error)
-			{
-			}
-
-			bws.Log("BWSExamineMenu.swf: injection complete (hint appended, ScrapItem wrapped)");
-			finishInjection();
 		}
 
 		private function finishInjection():void
@@ -224,15 +284,7 @@ package
 				lastVisible = vis;
 				hintData.ButtonVisible = vis;
 				becameVisible = vis;
-				// Transition log: proves in BetterWeaponScrappingF4SE.log
-				// whether the C++ visibility gate ever fires in-game.
-				try
-				{
-					bws.Log("BWSExamineMenu.swf: hint " + (vis ? "SHOWN" : "hidden"));
-				}
-				catch (errLog:Error)
-				{
-				}
+				log("BWSExamineMenu.swf: hint " + (vis ? "SHOWN" : "hidden"));
 			}
 
 			if (vis)
@@ -248,17 +300,8 @@ package
 				}
 			}
 
-			// The acquired bar renders through the game's separate
-			// ButtonBarMenu movie: native code marshals the hint vector
-			// across movies when SetButtonHintData runs. A hint submitted
-			// while invisible is not reliably re-marshaled by a later
-			// ButtonVisible flip alone, so when OUR hint just turned visible
-			// (or changed key), re-push the current mode's vector through the
-			// menu's own UpdateButtons — our SetButtonHintData wrapper keeps
-			// the hint appended. Deliberately NOT done on hide transitions:
-			// those coincide with the confirm dialog / picker opening, and
-			// resubmitting the workbench bar then could stomp the dialog's
-			// own button bar (natural UpdateButtons calls hide it instead).
+			// Re-submit through UpdateButtons when becoming visible so the
+			// wrapper builds a fresh Vector with ButtonVisible already true.
 			if (becameVisible)
 			{
 				try
@@ -271,9 +314,8 @@ package
 			}
 		}
 
-		// Click handler for the AS-constructed hint (the plugin-created one
-		// carries its own native callback). Both routes end in the same
-		// native OpenScrapMods() -> scrap-mods picker.
+		// Click handler for the AS-constructed hint. Ends in the same native
+		// OpenScrapMods() -> scrap-mods picker as the keyboard hotkey.
 		private function onScrapModsPressed():void
 		{
 			if (bws)

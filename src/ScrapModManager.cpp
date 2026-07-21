@@ -49,6 +49,32 @@
 
 namespace
 {
+	// HUD accent color from the player's Interface prefs (same source the
+	// game's Pip-Boy / workbench chrome uses). Falls back to classic FO4 green.
+	inline RE::NiColor ReadHUDColorFromINI()
+	{
+		auto* prefs = RE::INIPrefSettingCollection::GetSingleton();
+		if (!prefs) {
+			return RE::NiColor(0.07f, 1.0f, 0.08f);
+		}
+		float r = 18.0f, g = 255.0f, b = 21.0f;
+		if (auto* s = prefs->GetSetting("iHUDColorR:Interface"sv)) {
+			r = static_cast<float>(s->GetInt());
+		}
+		if (auto* s = prefs->GetSetting("iHUDColorG:Interface"sv)) {
+			g = static_cast<float>(s->GetInt());
+		}
+		if (auto* s = prefs->GetSetting("iHUDColorB:Interface"sv)) {
+			b = static_cast<float>(s->GetInt());
+		}
+		return RE::NiColor(r / 255.0f, g / 255.0f, b / 255.0f);
+	}
+
+	inline ImVec4 NiToImVec4(const RE::NiColor& a_c, float a_a = 1.0f)
+	{
+		return ImVec4(a_c.r, a_c.g, a_c.b, a_a);
+	}
+
 	void RefreshExamineMenuModList()
 	{
 		auto* ui = RE::UI::GetSingleton();
@@ -1042,10 +1068,103 @@ namespace BWS::ScrapModManager
 			return;
 		}
 
-		// The "SCRAP MODS" hotkey hint is no longer drawn here: it now lives
-		// in the game's own workbench button bar, appended by the injected
-		// BWSExamineMenu.swf (see ExamineMenuBridge.cpp + ShouldShowNativeHint
-		// below). Only the picker/confirm windows remain ImGui.
+		// Hotkey prompt: drawn in ImGui (same look as before the SWF work).
+		// The injected SWF also tries to append a native ButtonBarMenu hint;
+		// that path is still being verified against the game's shared bar
+		// marshal. Until it is confirmed in-game, this ImGui prompt is the
+		// reliable "press G for SCRAP MODS" cue — G itself is handled by
+		// WndProc regardless of which prompt is visible.
+		const auto hud = NiToImVec4(ReadHUDColorFromINI());
+
+		RE::ExamineMenu* hotkeyMenu = nullptr;
+		if (g_examineOpen.load(std::memory_order_acquire) &&
+			!g_examineConfirmOpen.load(std::memory_order_acquire) &&
+			g_phase.load(std::memory_order_acquire) == FlowPhase::kNone) {
+			std::lock_guard lk(g_examineMtx);
+			hotkeyMenu = g_examineMenuPtr;
+		}
+		if (hotkeyMenu && GetExamineWeaponCtx(hotkeyMenu).has_value()) {
+			const auto&  cfg = BWS::Settings::Get();
+			const ImGuiIO& io = ImGui::GetIO();
+			const ImVec2 size{ io.DisplaySize.x, io.DisplaySize.y };
+			const float  resSc = size.y / 1080.0f;
+			const float  promptSc = cfg.hotkeyPromptScale.load();
+
+			const int vk = cfg.scrapModHotkey.load();
+			char      keyBuf[32]{};
+			if (vk > 0 && vk < 256) {
+				if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) {
+					std::snprintf(keyBuf, sizeof(keyBuf), "%c", static_cast<char>(vk));
+				} else {
+					std::snprintf(keyBuf, sizeof(keyBuf), "VK 0x%X", vk);
+				}
+			} else {
+				std::snprintf(keyBuf, sizeof(keyBuf), "?");
+			}
+			const char* label = "SCRAP MODS";
+
+			constexpr auto kFlags =
+				ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoDecoration |
+				ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoFocusOnAppearing |
+				ImGuiWindowFlags_NoNav;
+
+			char fullText[96]{};
+			std::snprintf(fullText, sizeof(fullText), "%s  %s", keyBuf, label);
+
+			ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+			ImGui::Begin("##BWS_ScrapModHotkey_measure", nullptr,
+				kFlags | ImGuiWindowFlags_AlwaysAutoResize);
+			ImGui::SetWindowFontScale(promptSc);
+			const ImVec2 textSize = ImGui::CalcTextSize(fullText);
+			ImGui::SetWindowFontScale(1.0f);
+			ImGui::End();
+			ImGui::PopStyleVar();
+
+			const float scaledFontSz = ImGui::GetFontSize() * promptSc;
+			const float padX = scaledFontSz * 0.6f;
+			const float padY = scaledFontSz * 0.35f;
+			const float totalW = textSize.x + padX * 2.0f;
+			const float totalH = textSize.y + padY * 2.0f;
+
+			const float posX = std::min(size.x * cfg.hotkeyPromptX.load(), size.x - totalW - 8.0f * resSc);
+			const float posY = size.y * cfg.hotkeyPromptY.load();
+
+			ImGui::SetNextWindowPos(ImVec2(posX, posY - totalH * 0.5f), ImGuiCond_Always);
+			ImGui::SetNextWindowSize(ImVec2(totalW, totalH), ImGuiCond_Always);
+			ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+			ImGui::Begin("##BWS_ScrapModHotkey", nullptr, kFlags);
+			ImGui::PopStyleVar();
+			{
+				const float bracketW = std::max(2.0f, std::round(3.0f * resSc));
+				const float bracketInset = std::round(8.0f * resSc);
+
+				const ImVec2 winPos = ImGui::GetWindowPos();
+				const ImVec2 boxMin{ winPos.x, winPos.y };
+				const ImVec2 boxMax{ winPos.x + totalW, winPos.y + totalH };
+
+				auto*         dl = ImGui::GetForegroundDrawList();
+				const ImU32   bgCol = IM_COL32(0, 0, 0, 160);
+				const ImU32   hudCol = ImGui::ColorConvertFloat4ToU32(hud);
+
+				dl->AddRectFilled(boxMin, boxMax, bgCol);
+
+				dl->AddLine(ImVec2(boxMin.x, boxMin.y), ImVec2(boxMin.x, boxMax.y), hudCol, bracketW);
+				dl->AddLine(ImVec2(boxMin.x, boxMin.y), ImVec2(boxMin.x + bracketInset, boxMin.y), hudCol, bracketW);
+				dl->AddLine(ImVec2(boxMin.x, boxMax.y), ImVec2(boxMin.x + bracketInset, boxMax.y), hudCol, bracketW);
+
+				dl->AddLine(ImVec2(boxMax.x, boxMin.y), ImVec2(boxMax.x, boxMax.y), hudCol, bracketW);
+				dl->AddLine(ImVec2(boxMax.x, boxMin.y), ImVec2(boxMax.x - bracketInset, boxMin.y), hudCol, bracketW);
+				dl->AddLine(ImVec2(boxMax.x, boxMax.y), ImVec2(boxMax.x - bracketInset, boxMax.y), hudCol, bracketW);
+
+				const float textX = boxMin.x + (totalW - textSize.x) * 0.5f;
+				const float textY = boxMin.y + (totalH - textSize.y) * 0.5f;
+				dl->AddText(ImGui::GetFont(), ImGui::GetFontSize() * promptSc,
+					ImVec2(textX, textY), hudCol, fullText);
+				dl->AddText(ImGui::GetFont(), ImGui::GetFontSize() * promptSc,
+					ImVec2(textX + resSc, textY), hudCol, fullText);
+			}
+			ImGui::End();
+		}
 
 		const auto phase = g_phase.load(std::memory_order_acquire);
 		if (phase == FlowPhase::kNone) {
