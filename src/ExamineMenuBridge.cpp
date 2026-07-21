@@ -39,11 +39,11 @@
 // src/PauseMenuButton.cpp), applied to the weapon workbench:
 //
 //   1. F4SE Scaleform callback fires for Interface/ExamineMenu.swf.
-//   2. We register `root.bws` (native code object), pre-create a
-//      Shared.AS3.BSButtonHintData instance as `root.bws_hintData`, and load
+//   2. We register `root.bws` (native code object) and load
 //      swf/BWSExamineMenu.swf into the menu with a flash.display.Loader.
-//   3. The child SWF (swf/src/BWSExamineMenu.as) appends the hint to the
-//      button bar and wraps BGSCodeObj.ScrapItem so `bws.OnScrapRequested()`
+//   3. The child SWF constructs a host-domain BSButtonHintData, in-place
+//      pushes it onto ExamineMenu's live hint vectors via a SetButtonHintData
+//      wrapper, and wraps BGSCodeObj.ScrapItem so `bws.OnScrapRequested()`
 //      runs BEFORE the vanilla scrap builds its confirm dialog.
 //   4. When the player confirms the pre-scrap picker, the chosen recovery
 //      items are staged here and the vanilla scrap is re-invoked through the
@@ -252,31 +252,11 @@ namespace
 
 		rootObj.SetMember("bws", codeObj);
 
-		// Pre-create the button-bar hint in the HOST movie's application
-		// domain so it is exactly the class ExamineMenu's typed
-		// Vector.<BSButtonHintData> expects:
-		//   BSButtonHintData(text, pcKey, psnButton, xenonButton,
-		//                    justification, callback)
-		// The child SWF starts it hidden and drives ButtonVisible/SetButtons
-		// from IsHintVisible()/GetHintKey(). If this fails the SWF falls back
-		// to constructing one itself via getDefinitionByName.
-		{
-			Value args[6];
-			root->CreateString(std::addressof(args[0]), "SCRAP MODS");
-			root->CreateString(std::addressof(args[1]), HotkeyDisplayName().c_str());
-			root->CreateString(std::addressof(args[2]), "PSN_Y");
-			root->CreateString(std::addressof(args[3]), "Xenon_Y");
-			args[4] = std::uint32_t{ 1 };
-			root->CreateFunction(std::addressof(args[5]), new OpenScrapModsFunc());
-
-			Value hintData;
-			root->CreateObject(std::addressof(hintData), "Shared.AS3.BSButtonHintData", args, 6);
-			if (hintData.IsObject()) {
-				rootObj.SetMember("bws_hintData", hintData);
-			} else {
-				logger::warn("[BWS] ExamineMenuBridge: BSButtonHintData CreateObject failed; SWF will construct it"sv);
-			}
-		}
+		// BSButtonHintData is constructed in BWSExamineMenu.as via
+		// getDefinitionByName("Shared.AS3.BSButtonHintData") in the host
+		// application domain. C++ CreateObject previously produced an object
+		// that failed typed Vector.<BSButtonHintData>.push, so AS3 owns
+		// construction exclusively.
 
 		// Loader + URLRequest: load our SWF and parent it under the menu root
 		// (mirrors PauseMenuButton.cpp / MCM's "mcm_loader" sequence).
