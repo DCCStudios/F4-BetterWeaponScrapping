@@ -5,19 +5,19 @@ package
 
 	// Document (root) class for BWSExamineMenu.swf.
 	//
-	// Loaded into Interface/ExamineMenu.swf by ExamineMenuBridge via a
-	// flash.display.Loader. Registers against root.bws (native callbacks).
+	// Loaded into Interface/ExamineMenu.swf by ExamineMenuBridge via Loader.
+	//
+	// IMPORTANT: ExamineMenu.UpdateButtons is a class METHOD — it cannot be
+	// replaced with `base.UpdateButtons = fn` (non-dynamic class throws and
+	// aborts this SWF before any log). Only `ButtonHintBar_mc.SetButtonHintData`
+	// is a reassignable `public var ...:Function` (same as BSButtonHintBar).
 	//
 	// Jobs:
-	//  1. Show "SCRAP MODS" [G] on the real ButtonBarMenu hint bar.
-	//     Pushing a NEW BSButtonHintData into the live vectors does not
-	//     reliably produce a ButtonHintDataWithClone entry (we logged
-	//     hint SHOWN with never a hint vector OK). Instead we hijack
-	//     ExamineMenu's existing AlternateButton — already present in
-	//     InventoryButtonHints / ModSlotButtonHints / ModsListHints and
-	//     already wired through the native clone path. Vanilla only shows
-	//     it when strAlternateButtonText is non-empty (usually empty at
-	//     the weapons bench); we reclaim it after each UpdateButtons.
+	//  1. Show SCRAP MODS [G] on ButtonBarMenu by reclaiming the existing
+	//     AlternateButton entry already present in the live hint vectors
+	//     (wired through ButtonHintDataWithClone). Capture it inside the
+	//     SetButtonHintData wrapper; re-apply text/key/visibility every
+	//     frame after vanilla UpdateButtons resets it.
 	//  2. Wrap BGSCodeObj.ScrapItem for the pre-scrap recovery picker.
 	public class BWSExamineMenu extends MovieClip
 	{
@@ -27,13 +27,11 @@ package
 		private var bws:Object = null;
 		private var bar:Object = null;
 
-		// ExamineMenu.AlternateButton — host-domain object already in the
-		// live hint vectors and known to ButtonHintDataWithClone.
 		private var altHint:Object = null;
 		private var loggedAltCapture:Boolean = false;
 
-		private var origUpdate:Function = null;
-		private var updateWrapper:Function = null;
+		private var origSetNative:Function = null;
+		private var setWrapper:Function = null;
 
 		private var lastVisible:Boolean = false;
 		private var lastKey:String = "";
@@ -76,10 +74,10 @@ package
 			}
 		}
 
-		// AlternateButton is constructed as BSButtonHintData("", "R", ...).
-		// ScrapButton is also PCKey "R" but starts with ButtonText "$SCRAP".
-		// Capture happens at SetButtonHintData time, BEFORE UpdateButtons
-		// mutates AlternateButton.ButtonText.
+		// AlternateButton ctor: BSButtonHintData("", "R", ...).
+		// ScrapButton also uses PCKey "R" but ButtonText "$SCRAP".
+		// Capture runs at SetButtonHintData time, before UpdateButtons
+		// mutates AlternateButton.ButtonText / ButtonVisible.
 		private function findAlternateButton(v:*):Object
 		{
 			if (v == null)
@@ -105,26 +103,52 @@ package
 				{
 				}
 			}
-			// After we have claimed it, text is "SCRAP MODS" — keep identity
-			// if we already hold altHint and it is still in this vector.
-			if (altHint != null && v.indexOf(altHint) >= 0)
+			if (altHint != null)
 			{
-				return altHint;
+				try
+				{
+					if (v.indexOf(altHint) >= 0)
+					{
+						return altHint;
+					}
+				}
+				catch (err2:Error)
+				{
+				}
 			}
 			for (i = 0; i < v.length; i++)
 			{
 				h = v[i];
-				if (h && String(h.ButtonText) == "SCRAP MODS")
+				if (h)
 				{
-					return h;
+					try
+					{
+						if (String(h.ButtonText) == "SCRAP MODS")
+						{
+							return h;
+						}
+					}
+					catch (err3:Error)
+					{
+					}
 				}
 			}
 			return null;
 		}
 
-		// Drive the hijacked AlternateButton from plugin state. Called after
-		// every UpdateButtons (which resets Alternate to vanilla) and from
-		// the per-frame sync when visibility/key changes.
+		private function invokeNativeSet(v:*):void
+		{
+			bar.SetButtonHintData = origSetNative;
+			try
+			{
+				bar.SetButtonHintData(v);
+			}
+			finally
+			{
+				bar.SetButtonHintData = setWrapper;
+			}
+		}
+
 		private function applyAltHint():void
 		{
 			if (!altHint || !bws)
@@ -132,18 +156,21 @@ package
 				return;
 			}
 
-			// Yield if the game itself has claimed the alternate slot
-			// (non-empty text that is not our label).
+			// Yield if the game claimed the alternate slot for itself.
 			var curText:String = "";
+			var gameClaimed:Boolean = false;
 			try
 			{
 				curText = String(altHint.ButtonText);
+				gameClaimed = Boolean(altHint.ButtonVisible) &&
+					curText.length > 0 &&
+					curText != "SCRAP MODS";
 			}
 			catch (err:Error)
 			{
-				curText = "";
+				gameClaimed = false;
 			}
-			if (altHint.ButtonVisible && curText.length > 0 && curText != "SCRAP MODS")
+			if (gameClaimed)
 			{
 				return;
 			}
@@ -174,8 +201,6 @@ package
 				altHint.SetButtons(key, "PSN_Y", "Xenon_Y");
 				altHint.ButtonEnabled = true;
 				altHint.ButtonVisible = vis;
-				// onTextClick is the public click entry BSButtonHint invokes;
-				// replacing it routes bar clicks to our picker.
 				altHint.onTextClick = onScrapModsPressed;
 			}
 			catch (err4:Error)
@@ -211,61 +236,44 @@ package
 				return;
 			}
 
-			// Wrap UpdateButtons: capture the live vector during its
-			// SetButtonHintData call, then re-apply our AlternateButton
-			// claim after vanilla resets it.
-			origUpdate = base.UpdateButtons as Function;
+			log("BWSExamineMenu.swf: begin inject (bar acquired)");
+
+			origSetNative = bar.SetButtonHintData as Function;
 			var self:BWSExamineMenu = this;
-			updateWrapper = function():*
+			setWrapper = function(v:*):void
 			{
-				var nativeSet:Function = self.bar.SetButtonHintData as Function;
-				var captured:* = null;
-				self.bar.SetButtonHintData = function(v:*):void
+				if (v != null)
 				{
-					captured = v;
-					// Property-slot invoke of the real native/AS setter.
-					self.bar.SetButtonHintData = nativeSet;
 					try
 					{
-						self.bar.SetButtonHintData(v);
+						var found:Object = self.findAlternateButton(v);
+						if (found != null)
+						{
+							self.altHint = found;
+						}
 					}
-					finally
+					catch (errFind:Error)
 					{
-						// Leave restored; UpdateButtons only publishes once
-						// per call, then mutates hint properties in place.
-					}
-				};
-
-				var result:* = self.origUpdate.call(self.base);
-
-				// Ensure the bar property is native again if UpdateButtons
-				// never called SetButtonHintData (some modes).
-				self.bar.SetButtonHintData = nativeSet;
-
-				if (captured != null)
-				{
-					var found:Object = self.findAlternateButton(captured);
-					if (found != null)
-					{
-						self.altHint = found;
 					}
 				}
-
-				self.applyAltHint();
-				return result;
+				self.invokeNativeSet(v);
 			};
-			base.UpdateButtons = updateWrapper;
+			bar.SetButtonHintData = setWrapper;
 
 			wrapScrapItem(codeObj);
 
+			// Publish current mode through our wrapper so we capture AlternateButton.
+			// Do NOT assign to UpdateButtons — it is a method, not a Function var.
 			try
 			{
 				base.UpdateButtons();
 			}
 			catch (errUB:Error)
 			{
-				log("BWSExamineMenu.swf: initial UpdateButtons failed: " + errUB.message);
+				log("BWSExamineMenu.swf: UpdateButtons failed: " + errUB.message);
 			}
+
+			applyAltHint();
 
 			if (altHint)
 			{
@@ -273,7 +281,7 @@ package
 			}
 			else
 			{
-				log("BWSExamineMenu.swf: injection complete but AlternateButton NOT captured yet");
+				log("BWSExamineMenu.swf: injection complete; AlternateButton not in vector yet (will retry)");
 			}
 			finishInjection();
 		}
@@ -308,41 +316,38 @@ package
 
 		private function syncHint():void
 		{
-			if (!bws)
+			if (!bws || !bar)
 			{
 				return;
 			}
 
-			// Reinstall UpdateButtons wrap if something stole it.
-			if (base && updateWrapper != null && base.UpdateButtons != updateWrapper)
+			// Reinstall SetButtonHintData wrap if native stole it back.
+			if (setWrapper != null && bar.SetButtonHintData != setWrapper)
 			{
-				origUpdate = base.UpdateButtons as Function;
-				base.UpdateButtons = updateWrapper;
-				log("BWSExamineMenu.swf: reinstalled UpdateButtons wrapper");
+				origSetNative = bar.SetButtonHintData as Function;
+				bar.SetButtonHintData = setWrapper;
+				log("BWSExamineMenu.swf: reinstalled SetButtonHintData wrapper");
+				try
+				{
+					base.UpdateButtons();
+				}
+				catch (errRe:Error)
+				{
+				}
 			}
 
 			if (!altHint)
 			{
-				// Keep trying to capture via a forced UpdateButtons.
 				try
 				{
-					if (base)
-					{
-						base.UpdateButtons();
-					}
+					base.UpdateButtons();
 				}
 				catch (errCap:Error)
 				{
 				}
-				if (altHint && !loggedAltCapture)
-				{
-					loggedAltCapture = true;
-					log("BWSExamineMenu.swf: AlternateButton captured (deferred)");
-				}
-				return;
 			}
 
-			if (!loggedAltCapture)
+			if (altHint && !loggedAltCapture)
 			{
 				loggedAltCapture = true;
 				log("BWSExamineMenu.swf: AlternateButton captured for SCRAP MODS");
@@ -358,23 +363,26 @@ package
 				vis = false;
 			}
 
-			var key:String = String(bws.GetHintKey());
-			var changed:Boolean = (vis != lastVisible) || (vis && key != lastKey);
+			var key:String = "G";
+			try
+			{
+				key = String(bws.GetHintKey());
+			}
+			catch (errKey:Error)
+			{
+				key = "G";
+			}
 
 			if (vis != lastVisible)
 			{
 				lastVisible = vis;
 				log("BWSExamineMenu.swf: hint " + (vis ? "SHOWN" : "hidden"));
 			}
-			if (key != lastKey)
-			{
-				lastKey = key;
-			}
+			lastKey = key;
 
-			if (changed)
-			{
-				applyAltHint();
-			}
+			// Every frame: vanilla UpdateButtons may have cleared Alternate;
+			// put SCRAP MODS back. Property changes ride ButtonHintDataWithClone.
+			applyAltHint();
 		}
 
 		private function onScrapModsPressed():void

@@ -359,6 +359,17 @@ namespace
 		g_preScrapMode = false;
 		BlockGameInput(false);
 		PopWorldPause();
+		// Drain any leftover pause layers (open/close races) so leaving the
+		// workbench cannot strand the player with menuMode > 0.
+		while (g_worldPauseLayers > 0) {
+			PopWorldPause();
+		}
+		// Always clear keyboard/mouse ignore when the overlay closes — even if
+		// BlockInputWhilePicker is off — so a stuck ControlMap flag cannot
+		// lock the player after exiting the workbench.
+		if (auto* cm = RE::ControlMap::GetSingleton()) {
+			cm->SetIgnoreKeyboardMouse(false);
+		}
 	}
 
 	static RE::BGSConstructibleObject* FindConstructibleForForm(const RE::TESForm* a_createdItem)
@@ -1451,4 +1462,22 @@ void ScrapOverlay::QueuePending(PendingWeaponScrap a_pending)
 {
 	std::lock_guard lk(g_queueMtx);
 	g_pendingQueue.push_back(std::move(a_pending));
+}
+
+void ScrapOverlay::ForceDismiss()
+{
+	if (g_popupVisible.load()) {
+		DismissPopup();
+	} else {
+		// Even with no visible popup, clear any stranded ControlMap / pause
+		// layers (e.g. workbench closed mid-transition).
+		while (g_worldPauseLayers > 0) {
+			PopWorldPause();
+		}
+		if (auto* cm = RE::ControlMap::GetSingleton()) {
+			cm->SetIgnoreKeyboardMouse(false);
+		}
+	}
+	std::lock_guard lk(g_queueMtx);
+	g_pendingQueue.clear();
 }

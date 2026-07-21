@@ -3,6 +3,7 @@
 #include "ExamineMenuBridge.h"
 #include "ScrapModManager.h"
 #include "ScrapManager.h"
+#include "ScrapOverlay.h"
 #include "Settings.h"
 
 #include "RE/Bethesda/BGSInventoryItem.h"
@@ -731,17 +732,28 @@ namespace
 		return success;
 	}
 
-	void CloseFlow()
+	// How many UI::menuMode increments THIS flow still owes. OpenPicker
+	// bumps it; CloseFlow / ForceReleaseInputGuards drains it. Prevents a
+	// stranded menuMode from locking player controls after the workbench.
+	std::uint32_t g_scrapModMenuModeLayers{ 0 };
+
+	void ForceReleaseInputGuards()
 	{
-		if (g_phase.load(std::memory_order_acquire) != FlowPhase::kNone) {
-			if (auto* ui = RE::UI::GetSingleton(); ui && ui->menuMode > 0) {
+		if (auto* ui = RE::UI::GetSingleton()) {
+			while (g_scrapModMenuModeLayers > 0 && ui->menuMode > 0) {
 				ui->menuMode -= 1;
-			}
-			if (auto* cm = RE::ControlMap::GetSingleton();
-				BWS::Settings::Get().blockInputWhilePicker.load()) {
-				cm->SetIgnoreKeyboardMouse(false);
+				--g_scrapModMenuModeLayers;
 			}
 		}
+		g_scrapModMenuModeLayers = 0;
+		if (auto* cm = RE::ControlMap::GetSingleton()) {
+			cm->SetIgnoreKeyboardMouse(false);
+		}
+	}
+
+	void CloseFlow()
+	{
+		const bool wasOpen = g_phase.load(std::memory_order_acquire) != FlowPhase::kNone;
 		g_phase.store(FlowPhase::kNone, std::memory_order_release);
 		g_mods.clear();
 		g_confirmLines.clear();
@@ -751,6 +763,15 @@ namespace
 		g_invLooseConfirmIdx = 0;
 		g_swapCandidates.clear();
 		g_swapSlotIndex = -1;
+		// Always release guards when closing (or when called as a safety net
+		// after ExamineMenu exit). Previously we only cleared
+		// ignoreKeyboardMouse when phase was still non-None, which could
+		// leave the player control-locked if phase was cleared elsewhere.
+		if (wasOpen || g_scrapModMenuModeLayers > 0) {
+			ForceReleaseInputGuards();
+		} else if (auto* cm = RE::ControlMap::GetSingleton()) {
+			cm->SetIgnoreKeyboardMouse(false);
+		}
 	}
 
 	void OpenPickerFromExamine()
@@ -783,6 +804,7 @@ namespace
 
 		if (auto* ui = RE::UI::GetSingleton()) {
 			ui->menuMode += 1;
+			++g_scrapModMenuModeLayers;
 		}
 		if (auto* cm = RE::ControlMap::GetSingleton();
 			BWS::Settings::Get().blockInputWhilePicker.load()) {
@@ -932,11 +954,13 @@ namespace
 				} else {
 					g_examineOpen.store(false, std::memory_order_release);
 					g_examineMenuPtr = nullptr;
-					if (g_phase.load(std::memory_order_acquire) != FlowPhase::kNone) {
-						CloseFlow();
-					}
-					// Leaving the workbench entirely: no vanilla scrap can
-					// consume staged recovery items anymore.
+					// Leaving the workbench: tear down every BWS UI path and
+					// force-release ControlMap / menuMode. A stuck
+					// ignoreKeyboardMouse or leaked menuMode layer is what
+					// locks all player controls after exiting the bench.
+					CloseFlow();
+					ForceReleaseInputGuards();
+					ScrapOverlay::ForceDismiss();
 					BWS::ExamineMenuBridge::ClearStagedItems();
 				}
 			}

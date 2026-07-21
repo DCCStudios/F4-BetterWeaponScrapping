@@ -8,4 +8,6 @@ namespace ScrapOverlay
 {
 	void Install();
 	void QueuePending(PendingWeaponScrap a_pending);
+	/** Dismiss the recovery picker if open and release input/pause guards. */
+	void ForceDismiss();
 }
