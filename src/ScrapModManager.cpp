@@ -799,15 +799,16 @@ namespace
 		g_confirmLines.clear();
 		g_phase.store(FlowPhase::kPicker, std::memory_order_release);
 
-		if (auto* ui = RE::UI::GetSingleton()) {
-			ui->menuMode += 1;
-			++g_scrapModMenuModeLayers;
-		}
+		// Do NOT bump UI::menuMode here. ExamineMenu already holds a menuMode
+		// layer; adding ours races with workbench teardown and was leaving
+		// menuMode > 0 after exit (player fully control-locked). Input block
+		// is ignoreKeyboardMouse + WndProc swallow only.
 		if (auto* cm = RE::ControlMap::GetSingleton();
 			BWS::Settings::Get().blockInputWhilePicker.load()) {
 			cm->SetIgnoreKeyboardMouse(true);
 		}
 		::SetCursor(::LoadCursorW(nullptr, IDC_ARROW));
+		logger::info("[BWS] scrap-mod picker opened (no menuMode bump)"sv);
 	}
 
 	void RefreshModsAfterRemoval(std::uint32_t a_removedFormID = 0)
@@ -955,11 +956,44 @@ namespace
 					// force-release ControlMap / menuMode. A stuck
 					// ignoreKeyboardMouse or leaked menuMode layer is what
 					// locks all player controls after exiting the bench.
-					logger::info("[BWS] ExamineMenu closed — releasing input guards / dismissing BWS UI"sv);
+					{
+						std::uint32_t menuMode = 0;
+						bool         ignore = false;
+						if (auto* ui = RE::UI::GetSingleton()) {
+							menuMode = ui->menuMode;
+						}
+						if (auto* cm = RE::ControlMap::GetSingleton()) {
+							ignore = cm->ignoreKeyboardMouse;
+						}
+						logger::info("[BWS] ExamineMenu closed — releasing input guards (menuMode={} ignoreKeyboardMouse={})"sv,
+							menuMode, ignore);
+					}
 					CloseFlow();
 					ForceReleaseInputGuardsImpl();
 					ScrapOverlay::ForceDismiss();
 					BWS::ExamineMenuBridge::ClearStagedItems();
+					{
+						std::uint32_t menuMode = 0;
+						bool         ignore = false;
+						if (auto* ui = RE::UI::GetSingleton()) {
+							menuMode = ui->menuMode;
+						}
+						if (auto* cm = RE::ControlMap::GetSingleton()) {
+							ignore = cm->ignoreKeyboardMouse;
+						}
+						if (menuMode > 0 || ignore) {
+							logger::warn("[BWS] after release still menuMode={} ignoreKeyboardMouse={} — may lock controls"sv,
+								menuMode, ignore);
+							// Only force-clear ignore here. Do not touch menuMode:
+							// the close event can race the engine's own decrement,
+							// and stealing its layer corrupts other menus.
+							if (ignore) {
+								if (auto* cm = RE::ControlMap::GetSingleton()) {
+									cm->SetIgnoreKeyboardMouse(false);
+								}
+							}
+						}
+					}
 					spdlog::default_logger()->flush();
 				}
 			}

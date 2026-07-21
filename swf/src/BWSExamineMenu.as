@@ -286,9 +286,11 @@ package
 			cueBracketR.y = 0;
 
 			var totalW:Number = cueBracketR.x + 8;
-			// Sit just above the native ButtonBarMenu strip (bottom-center).
-			cueRoot.x = Math.round((stage.stageWidth - totalW) * 0.5);
-			cueRoot.y = Math.round(stage.stageHeight - 96);
+			// Bottom-right, just above the native ButtonBarMenu strip (near BACK).
+			var marginR:Number = 56;
+			var marginB:Number = 72;
+			cueRoot.x = Math.round(stage.stageWidth - totalW - marginR);
+			cueRoot.y = Math.round(stage.stageHeight - marginB);
 		}
 
 		private function syncCue():void

@@ -199,10 +199,24 @@ namespace
 
 	std::uint32_t g_worldPauseLayers{ 0 };
 
+	// True only while THIS plugin set ControlMap::ignoreKeyboardMouse.
+	// Cleared on release so we never fight other mods' menus.
+	bool g_bwsOwnsIgnoreKeyboard{ false };
+
 	LRESULT CALLBACK WndProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+	static void DismissPopup();
 
 	static void PushWorldPause()
 	{
+		// Never add a menuMode layer while ExamineMenu is open — it already
+		// paused the game. Extra layers were the prime suspect for the
+		// post-workbench control lock (menuMode left > 0 after exit).
+		if (BWS::ScrapModManager::IsExamineMenuOpen()) {
+			return;
+		}
+		if (!BWS::Settings::Get().pauseWhilePicker.load()) {
+			return;
+		}
 		if (auto* ui = RE::UI::GetSingleton()) {
 			ui->menuMode += 1;
 			++g_worldPauseLayers;
@@ -222,6 +236,35 @@ namespace
 		--g_worldPauseLayers;
 	}
 
+	// Ground-truth check: do not trust only our MenuOpenCloseEvent flag.
+	static bool IsExamineMenuReallyOpen()
+	{
+		auto* ui = RE::UI::GetSingleton();
+		if (!ui) {
+			return false;
+		}
+		static const RE::BSFixedString kExamine{ "ExamineMenu" };
+		return ui->GetMenuOpen(kExamine);
+	}
+
+	static void ReleaseAllBwsInputState(const char* a_reason)
+	{
+		logger::warn("[BWS] ReleaseAllBwsInputState: {}"sv, a_reason);
+		if (g_popupVisible.load()) {
+			DismissPopup();
+		}
+		while (g_worldPauseLayers > 0) {
+			PopWorldPause();
+		}
+		BWS::ScrapModManager::ForceClose();
+		BWS::ScrapModManager::ForceReleaseInputGuards();
+		if (auto* cm = RE::ControlMap::GetSingleton()) {
+			cm->SetIgnoreKeyboardMouse(false);
+		}
+		g_bwsOwnsIgnoreKeyboard = false;
+		spdlog::default_logger()->flush();
+	}
+
 	static void BlockGameInput(bool a_blocked)
 	{
 		if (a_blocked && !BWS::Settings::Get().blockInputWhilePicker.load()) {
@@ -229,6 +272,7 @@ namespace
 		}
 		if (auto* cm = RE::ControlMap::GetSingleton()) {
 			cm->SetIgnoreKeyboardMouse(a_blocked);
+			g_bwsOwnsIgnoreKeyboard = a_blocked;
 		}
 	}
 
@@ -370,6 +414,7 @@ namespace
 		if (auto* cm = RE::ControlMap::GetSingleton()) {
 			cm->SetIgnoreKeyboardMouse(false);
 		}
+		g_bwsOwnsIgnoreKeyboard = false;
 	}
 
 	static RE::BGSConstructibleObject* FindConstructibleForForm(const RE::TESForm* a_createdItem)
@@ -1357,6 +1402,21 @@ namespace
 			GImGui->NavWindowingTarget = nullptr;
 		}
 
+		// If ExamineMenu is actually gone (ground truth) but we still hold
+		// any input/pause state, release it. Relies on GetMenuOpen, not only
+		// our MenuOpenCloseEvent flag — that race was leaving players locked.
+		if (!IsExamineMenuReallyOpen()) {
+			const bool stranded =
+				g_popupVisible.load() ||
+				BWS::ScrapModManager::BlocksGameInput() ||
+				g_worldPauseLayers > 0 ||
+				g_bwsOwnsIgnoreKeyboard ||
+				BWS::ScrapModManager::IsExamineMenuOpen();
+			if (stranded) {
+				ReleaseAllBwsInputState("HUD tick: ExamineMenu gone, BWS state stranded");
+			}
+		}
+
 		RenderScrapModal();
 		BWS::ScrapModManager::Draw();
 
@@ -1382,15 +1442,11 @@ namespace
 	LRESULT CALLBACK WndProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	{
 		if (g_initialized.load()) {
-			// If the workbench is gone but we still think a BWS menu owns
-			// input, release immediately — otherwise every WM_* is swallowed
-			// below and the player is permanently control-locked.
-			if (!BWS::ScrapModManager::IsExamineMenuOpen() &&
-				(g_popupVisible.load() || BWS::ScrapModManager::BlocksGameInput())) {
-				logger::warn("[BWS] WndProc: stranded BWS UI without ExamineMenu — forcing release"sv);
-				DismissAllImGuiMenus();
-				ScrapOverlay::ForceDismiss();
-				BWS::ScrapModManager::ForceReleaseInputGuards();
+			// Ground truth: if ExamineMenu is gone, never swallow input.
+			if (!IsExamineMenuReallyOpen() &&
+				(g_popupVisible.load() || BWS::ScrapModManager::BlocksGameInput() ||
+					g_bwsOwnsIgnoreKeyboard || g_worldPauseLayers > 0)) {
+				ReleaseAllBwsInputState("WndProc: ExamineMenu gone, refusing to swallow input");
 			}
 
 			if (msg == WM_KEYDOWN && !g_popupVisible.load() &&
@@ -1488,6 +1544,7 @@ void ScrapOverlay::ForceDismiss()
 		if (auto* cm = RE::ControlMap::GetSingleton()) {
 			cm->SetIgnoreKeyboardMouse(false);
 		}
+		g_bwsOwnsIgnoreKeyboard = false;
 	}
 	std::lock_guard lk(g_queueMtx);
 	g_pendingQueue.clear();
