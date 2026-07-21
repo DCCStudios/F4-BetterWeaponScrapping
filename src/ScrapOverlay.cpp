@@ -1382,6 +1382,17 @@ namespace
 	LRESULT CALLBACK WndProcHook(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	{
 		if (g_initialized.load()) {
+			// If the workbench is gone but we still think a BWS menu owns
+			// input, release immediately — otherwise every WM_* is swallowed
+			// below and the player is permanently control-locked.
+			if (!BWS::ScrapModManager::IsExamineMenuOpen() &&
+				(g_popupVisible.load() || BWS::ScrapModManager::BlocksGameInput())) {
+				logger::warn("[BWS] WndProc: stranded BWS UI without ExamineMenu — forcing release"sv);
+				DismissAllImGuiMenus();
+				ScrapOverlay::ForceDismiss();
+				BWS::ScrapModManager::ForceReleaseInputGuards();
+			}
+
 			if (msg == WM_KEYDOWN && !g_popupVisible.load() &&
 				!BWS::ScrapModManager::BlocksGameInput()) {
 				if (BWS::ScrapModManager::TryHotkey(wParam)) {

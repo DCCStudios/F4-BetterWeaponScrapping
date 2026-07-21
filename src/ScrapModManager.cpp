@@ -737,7 +737,7 @@ namespace
 	// stranded menuMode from locking player controls after the workbench.
 	std::uint32_t g_scrapModMenuModeLayers{ 0 };
 
-	void ForceReleaseInputGuards()
+	void ForceReleaseInputGuardsImpl()
 	{
 		if (auto* ui = RE::UI::GetSingleton()) {
 			while (g_scrapModMenuModeLayers > 0 && ui->menuMode > 0) {
@@ -746,6 +746,7 @@ namespace
 			}
 		}
 		g_scrapModMenuModeLayers = 0;
+		g_phase.store(FlowPhase::kNone, std::memory_order_release);
 		if (auto* cm = RE::ControlMap::GetSingleton()) {
 			cm->SetIgnoreKeyboardMouse(false);
 		}
@@ -767,11 +768,7 @@ namespace
 		// after ExamineMenu exit). Previously we only cleared
 		// ignoreKeyboardMouse when phase was still non-None, which could
 		// leave the player control-locked if phase was cleared elsewhere.
-		if (wasOpen || g_scrapModMenuModeLayers > 0) {
-			ForceReleaseInputGuards();
-		} else if (auto* cm = RE::ControlMap::GetSingleton()) {
-			cm->SetIgnoreKeyboardMouse(false);
-		}
+		ForceReleaseInputGuardsImpl();
 	}
 
 	void OpenPickerFromExamine()
@@ -958,10 +955,12 @@ namespace
 					// force-release ControlMap / menuMode. A stuck
 					// ignoreKeyboardMouse or leaked menuMode layer is what
 					// locks all player controls after exiting the bench.
+					logger::info("[BWS] ExamineMenu closed — releasing input guards / dismissing BWS UI"sv);
 					CloseFlow();
-					ForceReleaseInputGuards();
+					ForceReleaseInputGuardsImpl();
 					ScrapOverlay::ForceDismiss();
 					BWS::ExamineMenuBridge::ClearStagedItems();
+					spdlog::default_logger()->flush();
 				}
 			}
 			if (a_event.menuName == "ExamineConfirmMenu"sv) {
@@ -1003,6 +1002,16 @@ namespace BWS::ScrapModManager
 	void ForceClose()
 	{
 		CloseFlow();
+	}
+
+	bool IsExamineMenuOpen()
+	{
+		return g_examineOpen.load(std::memory_order_acquire);
+	}
+
+	void ForceReleaseInputGuards()
+	{
+		ForceReleaseInputGuardsImpl();
 	}
 
 	bool ShouldShowNativeHint()
@@ -1066,11 +1075,15 @@ namespace BWS::ScrapModManager
 			return;
 		}
 
-		// The "SCRAP MODS" hotkey cue lives on the workbench ButtonBarMenu,
-		// appended by BWSExamineMenu.swf into ExamineMenu's live hint vectors
-		// (see ExamineMenuBridge + ShouldShowNativeHint). Only the picker /
-		// confirm windows remain ImGui. The G key itself is still handled by
-		// WndProc via TryHotkey.
+		// Safety net: if the workbench closed but our ImGui flow / input block
+		// is still active, WndProc would keep swallowing all keyboard/mouse
+		// and the player stays locked. Clear it immediately.
+		if (!g_examineOpen.load(std::memory_order_acquire) &&
+			g_phase.load(std::memory_order_acquire) != FlowPhase::kNone) {
+			logger::warn("[BWS] scrap-mod UI stranded after ExamineMenu close — forcing release"sv);
+			CloseFlow();
+			return;
+		}
 
 		const auto phase = g_phase.load(std::memory_order_acquire);
 		if (phase == FlowPhase::kNone) {

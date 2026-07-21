@@ -20,6 +20,15 @@ namespace BWS::ScrapModManager
 	/** Immediately closes the scrap-mod flow, releasing input and menuMode. */
 	void ForceClose();
 
+	/** True while ExamineMenu is open (weapons/armor/cooking workbench). */
+	bool IsExamineMenuOpen();
+
+	/**
+	 * Force-clear ControlMap ignore + any menuMode layers we added.
+	 * Safe to call when leaving the workbench or recovering from a stranded UI.
+	 */
+	void ForceReleaseInputGuards();
+
 	/**
 	 * True when the native "SCRAP MODS" button-bar hint should be visible:
 	 * feature enabled, ExamineMenu open on a modded weapon, no confirm dialog

@@ -1,24 +1,21 @@
 package
 {
 	import flash.display.MovieClip;
+	import flash.display.Sprite;
 	import flash.events.Event;
+	import flash.events.MouseEvent;
+	import flash.text.AntiAliasType;
+	import flash.text.TextField;
+	import flash.text.TextFieldAutoSize;
+	import flash.text.TextFormat;
 
-	// Document (root) class for BWSExamineMenu.swf.
+	// Document class for BWSExamineMenu.swf — injected into ExamineMenu.swf.
 	//
-	// Loaded into Interface/ExamineMenu.swf by ExamineMenuBridge via Loader.
-	//
-	// IMPORTANT: ExamineMenu.UpdateButtons is a class METHOD — it cannot be
-	// replaced with `base.UpdateButtons = fn` (non-dynamic class throws and
-	// aborts this SWF before any log). Only `ButtonHintBar_mc.SetButtonHintData`
-	// is a reassignable `public var ...:Function` (same as BSButtonHintBar).
-	//
-	// Jobs:
-	//  1. Show SCRAP MODS [G] on ButtonBarMenu by reclaiming the existing
-	//     AlternateButton entry already present in the live hint vectors
-	//     (wired through ButtonHintDataWithClone). Capture it inside the
-	//     SetButtonHintData wrapper; re-apply text/key/visibility every
-	//     frame after vanilla UpdateButtons resets it.
-	//  2. Wrap BGSCodeObj.ScrapItem for the pre-scrap recovery picker.
+	// ButtonBarMenu / ButtonHintDataWithClone has repeatedly refused both a
+	// new BSButtonHintData push and an AlternateButton hijack (log: "not in
+	// vector yet" forever). The reliable cue is a Scaleform prompt we draw
+	// ourselves on the host movie root, sitting on the workbench UI next to
+	// the native button bar. ScrapItem wrap still intercepts SCRAP.
 	public class BWSExamineMenu extends MovieClip
 	{
 		private var injected:Boolean = false;
@@ -27,12 +24,15 @@ package
 		private var bws:Object = null;
 		private var bar:Object = null;
 
-		private var altHint:Object = null;
-		private var loggedAltCapture:Boolean = false;
-
 		private var origSetNative:Function = null;
 		private var setWrapper:Function = null;
+		private var dumpedVector:Boolean = false;
 
+		// On-screen cue drawn into the host ExamineMenu root.
+		private var cueRoot:Sprite = null;
+		private var cueBracketL:Sprite = null;
+		private var cueBracketR:Sprite = null;
+		private var cueText:TextField = null;
 		private var lastVisible:Boolean = false;
 		private var lastKey:String = "";
 
@@ -50,7 +50,7 @@ package
 			}
 			else
 			{
-				syncHint();
+				syncCue();
 			}
 		}
 
@@ -71,141 +71,6 @@ package
 			}
 			catch (err:Error)
 			{
-			}
-		}
-
-		// AlternateButton ctor: BSButtonHintData("", "R", ...).
-		// ScrapButton also uses PCKey "R" but ButtonText "$SCRAP".
-		// Capture runs at SetButtonHintData time, before UpdateButtons
-		// mutates AlternateButton.ButtonText / ButtonVisible.
-		private function findAlternateButton(v:*):Object
-		{
-			if (v == null)
-			{
-				return null;
-			}
-			var i:int = 0;
-			for (i = 0; i < v.length; i++)
-			{
-				var h:Object = v[i];
-				if (!h)
-				{
-					continue;
-				}
-				try
-				{
-					if (String(h.PCKey) == "R" && String(h.ButtonText) == "")
-					{
-						return h;
-					}
-				}
-				catch (err:Error)
-				{
-				}
-			}
-			if (altHint != null)
-			{
-				try
-				{
-					if (v.indexOf(altHint) >= 0)
-					{
-						return altHint;
-					}
-				}
-				catch (err2:Error)
-				{
-				}
-			}
-			for (i = 0; i < v.length; i++)
-			{
-				h = v[i];
-				if (h)
-				{
-					try
-					{
-						if (String(h.ButtonText) == "SCRAP MODS")
-						{
-							return h;
-						}
-					}
-					catch (err3:Error)
-					{
-					}
-				}
-			}
-			return null;
-		}
-
-		private function invokeNativeSet(v:*):void
-		{
-			bar.SetButtonHintData = origSetNative;
-			try
-			{
-				bar.SetButtonHintData(v);
-			}
-			finally
-			{
-				bar.SetButtonHintData = setWrapper;
-			}
-		}
-
-		private function applyAltHint():void
-		{
-			if (!altHint || !bws)
-			{
-				return;
-			}
-
-			// Yield if the game claimed the alternate slot for itself.
-			var curText:String = "";
-			var gameClaimed:Boolean = false;
-			try
-			{
-				curText = String(altHint.ButtonText);
-				gameClaimed = Boolean(altHint.ButtonVisible) &&
-					curText.length > 0 &&
-					curText != "SCRAP MODS";
-			}
-			catch (err:Error)
-			{
-				gameClaimed = false;
-			}
-			if (gameClaimed)
-			{
-				return;
-			}
-
-			var vis:Boolean = false;
-			try
-			{
-				vis = Boolean(bws.IsHintVisible());
-			}
-			catch (err2:Error)
-			{
-				vis = false;
-			}
-
-			var key:String = "G";
-			try
-			{
-				key = String(bws.GetHintKey());
-			}
-			catch (err3:Error)
-			{
-				key = "G";
-			}
-
-			try
-			{
-				altHint.ButtonText = "SCRAP MODS";
-				altHint.SetButtons(key, "PSN_Y", "Xenon_Y");
-				altHint.ButtonEnabled = true;
-				altHint.ButtonVisible = vis;
-				altHint.onTextClick = onScrapModsPressed;
-			}
-			catch (err4:Error)
-			{
-				log("BWSExamineMenu.swf: applyAltHint failed: " + err4.message);
 			}
 		}
 
@@ -238,32 +103,32 @@ package
 
 			log("BWSExamineMenu.swf: begin inject (bar acquired)");
 
+			// Optional: keep wrapping SetButtonHintData only to dump the live
+			// vector once for diagnostics (why AlternateButton hijack failed).
 			origSetNative = bar.SetButtonHintData as Function;
 			var self:BWSExamineMenu = this;
 			setWrapper = function(v:*):void
 			{
-				if (v != null)
+				if (v != null && !self.dumpedVector)
 				{
-					try
-					{
-						var found:Object = self.findAlternateButton(v);
-						if (found != null)
-						{
-							self.altHint = found;
-						}
-					}
-					catch (errFind:Error)
-					{
-					}
+					self.dumpedVector = true;
+					self.dumpHintVector(v);
 				}
-				self.invokeNativeSet(v);
+				self.bar.SetButtonHintData = self.origSetNative;
+				try
+				{
+					self.bar.SetButtonHintData(v);
+				}
+				finally
+				{
+					self.bar.SetButtonHintData = self.setWrapper;
+				}
 			};
 			bar.SetButtonHintData = setWrapper;
 
 			wrapScrapItem(codeObj);
+			ensureCue(host);
 
-			// Publish current mode through our wrapper so we capture AlternateButton.
-			// Do NOT assign to UpdateButtons — it is a method, not a Function var.
 			try
 			{
 				base.UpdateButtons();
@@ -273,17 +138,38 @@ package
 				log("BWSExamineMenu.swf: UpdateButtons failed: " + errUB.message);
 			}
 
-			applyAltHint();
+			log("BWSExamineMenu.swf: injection complete (Scaleform cue + ScrapItem wrap)");
+			injected = true;
+		}
 
-			if (altHint)
+		private function dumpHintVector(v:*):void
+		{
+			try
 			{
-				log("BWSExamineMenu.swf: injection complete (AlternateButton hijack + ScrapItem wrap)");
+				var parts:Array = [];
+				var i:int = 0;
+				for (i = 0; i < v.length; i++)
+				{
+					var h:Object = v[i];
+					if (!h)
+					{
+						parts.push("[" + i + "]=null");
+						continue;
+					}
+					var key:String = "?";
+					var text:String = "?";
+					var vis:String = "?";
+					try { key = String(h.PCKey); } catch (e1:Error) {}
+					try { text = String(h.ButtonText); } catch (e2:Error) {}
+					try { vis = String(h.ButtonVisible); } catch (e3:Error) {}
+					parts.push("[" + i + "] key='" + key + "' text='" + text + "' vis=" + vis);
+				}
+				log("BWSExamineMenu.swf: hint vector len=" + v.length + " " + parts.join(" | "));
 			}
-			else
+			catch (err:Error)
 			{
-				log("BWSExamineMenu.swf: injection complete; AlternateButton not in vector yet (will retry)");
+				log("BWSExamineMenu.swf: dumpHintVector failed: " + err.message);
 			}
-			finishInjection();
 		}
 
 		private function wrapScrapItem(codeObj:Object):void
@@ -309,48 +195,114 @@ package
 			};
 		}
 
-		private function finishInjection():void
+		// Build a Pip-Boy-style bracketed prompt on the HOST root so it sits
+		// in the workbench movie (not buried inside the Loader content).
+		private function ensureCue(host:Object):void
 		{
-			injected = true;
-		}
-
-		private function syncHint():void
-		{
-			if (!bws || !bar)
+			if (cueRoot)
 			{
 				return;
 			}
 
-			// Reinstall SetButtonHintData wrap if native stole it back.
-			if (setWrapper != null && bar.SetButtonHintData != setWrapper)
+			cueRoot = new Sprite();
+			cueRoot.mouseChildren = true;
+			cueRoot.buttonMode = true;
+			cueRoot.mouseEnabled = true;
+
+			cueText = new TextField();
+			cueText.autoSize = TextFieldAutoSize.LEFT;
+			cueText.selectable = false;
+			cueText.mouseEnabled = false;
+			cueText.antiAliasType = AntiAliasType.ADVANCED;
+			// Prefer the game's Pip-Boy font (registered on the host movie).
+			// If embed fails and text measures empty, fall back to device fonts.
+			cueText.embedFonts = true;
+			var fmt:TextFormat = new TextFormat("$MAIN_Font_Bold", 20, 0x12FF15);
+			cueText.defaultTextFormat = fmt;
+			cueText.setTextFormat(fmt);
+			cueText.text = "G  SCRAP MODS";
+			if (cueText.textWidth < 2)
+			{
+				cueText.embedFonts = false;
+				fmt.font = "_sans";
+				cueText.defaultTextFormat = fmt;
+				cueText.setTextFormat(fmt);
+				cueText.text = "G  SCRAP MODS";
+				log("BWSExamineMenu.swf: $MAIN_Font_Bold unavailable — using device _sans");
+			}
+
+			cueBracketL = makeBracket(true);
+			cueBracketR = makeBracket(false);
+
+			cueRoot.addChild(cueBracketL);
+			cueRoot.addChild(cueText);
+			cueRoot.addChild(cueBracketR);
+			cueRoot.addEventListener(MouseEvent.CLICK, onCueClick);
+
+			cueRoot.visible = false;
+			host.addChild(cueRoot);
+			log("BWSExamineMenu.swf: Scaleform SCRAP MODS cue attached to host root");
+		}
+
+		private function makeBracket(left:Boolean):Sprite
+		{
+			var s:Sprite = new Sprite();
+			s.mouseEnabled = false;
+			var c:uint = 0x12FF15;
+			s.graphics.lineStyle(2, c, 1.0, true, "normal", "square", "miter");
+			if (left)
+			{
+				s.graphics.moveTo(8, 0);
+				s.graphics.lineTo(0, 0);
+				s.graphics.lineTo(0, 28);
+				s.graphics.lineTo(8, 28);
+			}
+			else
+			{
+				s.graphics.moveTo(0, 0);
+				s.graphics.lineTo(8, 0);
+				s.graphics.lineTo(8, 28);
+				s.graphics.lineTo(0, 28);
+			}
+			return s;
+		}
+
+		private function layoutCue():void
+		{
+			if (!cueRoot || !cueText || !stage)
+			{
+				return;
+			}
+
+			var padX:Number = 10;
+			var textW:Number = cueText.textWidth + 4;
+			var textH:Number = Math.max(cueText.textHeight + 4, 22);
+			cueText.x = 12;
+			cueText.y = (28 - textH) * 0.5;
+
+			cueBracketL.x = 0;
+			cueBracketL.y = 0;
+			cueBracketR.x = cueText.x + textW + padX;
+			cueBracketR.y = 0;
+
+			var totalW:Number = cueBracketR.x + 8;
+			// Sit just above the native ButtonBarMenu strip (bottom-center).
+			cueRoot.x = Math.round((stage.stageWidth - totalW) * 0.5);
+			cueRoot.y = Math.round(stage.stageHeight - 96);
+		}
+
+		private function syncCue():void
+		{
+			if (!bws || !cueRoot)
+			{
+				return;
+			}
+
+			// Keep SetButtonHintData wrap alive for diagnostics.
+			if (bar && setWrapper != null && bar.SetButtonHintData != setWrapper)
 			{
 				origSetNative = bar.SetButtonHintData as Function;
 				bar.SetButtonHintData = setWrapper;
-				log("BWSExamineMenu.swf: reinstalled SetButtonHintData wrapper");
-				try
-				{
-					base.UpdateButtons();
-				}
-				catch (errRe:Error)
-				{
-				}
-			}
-
-			if (!altHint)
-			{
-				try
-				{
-					base.UpdateButtons();
-				}
-				catch (errCap:Error)
-				{
-				}
-			}
-
-			if (altHint && !loggedAltCapture)
-			{
-				loggedAltCapture = true;
-				log("BWSExamineMenu.swf: AlternateButton captured for SCRAP MODS");
 			}
 
 			var vis:Boolean = false;
@@ -376,16 +328,23 @@ package
 			if (vis != lastVisible)
 			{
 				lastVisible = vis;
-				log("BWSExamineMenu.swf: hint " + (vis ? "SHOWN" : "hidden"));
+				log("BWSExamineMenu.swf: cue " + (vis ? "SHOWN" : "hidden"));
 			}
-			lastKey = key;
 
-			// Every frame: vanilla UpdateButtons may have cleared Alternate;
-			// put SCRAP MODS back. Property changes ride ButtonHintDataWithClone.
-			applyAltHint();
+			if (vis && key != lastKey)
+			{
+				lastKey = key;
+			}
+
+			cueRoot.visible = vis;
+			if (vis)
+			{
+				cueText.text = key + "  SCRAP MODS";
+				layoutCue();
+			}
 		}
 
-		private function onScrapModsPressed():void
+		private function onCueClick(e:MouseEvent):void
 		{
 			if (bws)
 			{
