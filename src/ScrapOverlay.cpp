@@ -5,6 +5,7 @@
 #include "Settings.h"
 #include "BWS_RendererData.h"
 
+#include "RE/Bethesda/BGSInventoryItem.h"
 #include "RE/Bethesda/BGSMod.h"
 #include "RE/Bethesda/BSTSmartPointer.h"
 #include "RE/Bethesda/ControlMap.h"
@@ -679,6 +680,116 @@ namespace
 		BWS::ExamineMenuBridge::InvokeVanillaScrap();
 	}
 
+	// What the player gets back when a mod is removed from the weapon while
+	// KEEPING the weapon.
+	enum class RemoveYield
+	{
+		kLooseItems,  // return each removed mod as its loose OMOD misc item
+		kComponents   // break each removed mod into its crafting components
+	};
+
+	// "Keep weapon" action. Detaches every attached mod from the examined
+	// weapon in the player's inventory using the game's own remove path
+	// (BGSInventoryItem::ModifyModDataFunctor with attach=false, applied via
+	// TESObjectREFR::FindAndWriteStackDataForInventoryItem — the same path the
+	// weapons workbench UI uses), then grants the recovered items. The weapon
+	// itself is never scrapped and the vanilla scrap is never invoked.
+	static void RemoveModsKeepWeapon(RemoveYield a_yield)
+	{
+		auto* player = RE::PlayerCharacter::GetSingleton();
+		if (!player) {
+			DismissPopup();
+			return;
+		}
+		const bool dbg = BWS::Settings::Get().debugLogging.load();
+
+		// Snapshot state before DismissPopup() clears g_active.
+		const std::uint32_t weaponFID = g_active.weaponBaseFormID;
+		const std::uint32_t stackID   = g_active.modStackID;
+
+		struct DetachTarget
+		{
+			std::uint32_t formID;
+			std::uint8_t  attachIndex;
+		};
+		std::vector<DetachTarget> detach;
+		detach.reserve(g_active.mods.size());
+
+		// Build the grant list according to the chosen yield (independent of
+		// the per-mod checkboxes: these buttons act on ALL attached mods).
+		auto items = std::make_shared<std::vector<DeferredItem>>();
+		auto& loose = RE::BGSMod::Attachment::GetAllLooseMods();
+
+		for (const auto& pick : g_active.mods) {
+			detach.push_back({ pick.formID, pick.attachIndex });
+
+			if (a_yield == RemoveYield::kLooseItems) {
+				if (auto* mod = RE::TESForm::GetFormByID<RE::BGSMod::Attachment::Mod>(pick.formID)) {
+					if (auto it = loose.find(mod); it != loose.end() && it->second) {
+						items->push_back(DeferredItem{
+							static_cast<std::uint32_t>(it->second->GetFormID()), 1 });
+					}
+				}
+			} else {
+				CollectScrapComponentsForMod(pick, *items, dbg);
+			}
+		}
+
+		logger::info(
+			"[BWS] remove-mods (keep weapon, {}): weapon {:08X} stack {}, {} mod(s), {} grant stack(s)"sv,
+			a_yield == RemoveYield::kLooseItems ? "loose" : "components",
+			weaponFID, stackID, detach.size(), items->size());
+
+		DismissPopup();
+
+		// Inventory mutation must run on the game thread, not during ImGui
+		// render. Detach first, then grant.
+		auto job = [weaponFID, stackID, detach = std::move(detach), items, dbg]() {
+			auto* pl = RE::PlayerCharacter::GetSingleton();
+			auto* weaponBase = RE::TESForm::GetFormByID<RE::TESBoundObject>(weaponFID);
+			if (!pl || !weaponBase) {
+				logger::warn("[BWS] remove-mods: player or weapon base missing; aborting"sv);
+				return;
+			}
+
+			for (const auto& t : detach) {
+				auto* mod = RE::TESForm::GetFormByID<RE::BGSMod::Attachment::Mod>(t.formID);
+				if (!mod) {
+					continue;
+				}
+				bool ok = false;
+				RE::BGSInventoryItem::CheckStackIDFunctor  compare{ stackID };
+				RE::BGSInventoryItem::ModifyModDataFunctor writer{
+					mod, static_cast<std::int8_t>(t.attachIndex), /*attach*/ false, std::addressof(ok)
+				};
+				pl->FindAndWriteStackDataForInventoryItem(weaponBase, compare, writer);
+				if (dbg) {
+					logger::info("[BWS]   detach {:08X} (slot {}) -> {}"sv,
+						t.formID, t.attachIndex, ok ? "applied" : "not-applied");
+				}
+			}
+
+			for (const auto& di : *items) {
+				if (auto* bound = RE::TESForm::GetFormByID<RE::TESBoundObject>(di.formID)) {
+					pl->AddObjectToContainer(bound, nullptr, di.count, nullptr,
+						static_cast<RE::ITEM_REMOVE_REASON>(0));
+				}
+			}
+
+			if (BWS::Settings::Get().showApplyHudMessage.load()) {
+				RE::SendHUDMessage::ShowHUDMessage(
+					"Better Weapon Scrapping: mods removed from weapon.", nullptr, false, false);
+			}
+			RefreshExamineMenuModList();
+		};
+
+		if (const auto* tasks = F4SE::GetTaskInterface()) {
+			tasks->AddTask(job);
+		} else {
+			job();
+		}
+	}
+
 	static void ScrapAllModsForParts(const PendingWeaponScrap& a_data)
 	{
 		auto* player = RE::PlayerCharacter::GetSingleton();
@@ -1059,6 +1170,32 @@ namespace
 			if (ImGui::Button("Cancel", ImVec2(btnW, 0))) {
 				// Abort entirely — the weapon is untouched.
 				DismissPopup();
+			}
+
+			// Second row: keep the weapon, just strip its mods. Only makes
+			// sense when the weapon actually has removable mods.
+			if (!g_active.mods.empty()) {
+				ImGui::Spacing();
+				ImGui::TextDisabled("Keep the weapon \xe2\x80\x94 remove its mods only:");
+				if (ImGui::Button("Remove \xe2\x86\x92 Inventory", ImVec2(std::round(btnW * 1.4f), 0))) {
+					// Detach all mods; return each as its loose mod item.
+					RemoveModsKeepWeapon(RemoveYield::kLooseItems);
+				}
+				if (ImGui::IsItemHovered()) {
+					ImGui::SetTooltip(
+						"Detach every mod from this weapon and place the loose mods in your inventory. "
+						"The weapon stays and reverts to its default parts.");
+				}
+				ImGui::SameLine();
+				if (ImGui::Button("Remove \xe2\x86\x92 Components", ImVec2(std::round(btnW * 1.4f), 0))) {
+					// Detach all mods; break each into crafting components.
+					RemoveModsKeepWeapon(RemoveYield::kComponents);
+				}
+				if (ImGui::IsItemHovered()) {
+					ImGui::SetTooltip(
+						"Detach every mod from this weapon and break the mods into crafting components. "
+						"The weapon stays and reverts to its default parts.");
+				}
 			}
 		} else {
 			if (ImGui::Button("Apply", ImVec2(btnW, 0))) {

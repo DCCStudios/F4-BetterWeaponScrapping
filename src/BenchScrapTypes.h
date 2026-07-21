@@ -16,6 +16,10 @@ struct PendingModPick
 {
 	std::uint32_t formID{ 0 };
 	std::string   label;
+	// OMOD attach slot index (BGSMod::ObjectIndexData::index). Needed to
+	// detach the mod from the inventory weapon via ModifyModDataFunctor
+	// without scrapping the weapon (the "keep weapon" actions).
+	std::uint8_t  attachIndex{ 0 };
 };
 
 struct RecipeMaterialLine
@@ -36,6 +40,14 @@ struct PendingWeaponScrap
 	// stages selections into the native scrappingArray and re-invokes the
 	// vanilla scrap, instead of granting items itself afterwards.
 	bool preScrap{ false };
+
+	// Identify the exact inventory weapon the workbench is examining, so the
+	// "keep weapon" actions can detach its mods in place (ModifyModDataFunctor
+	// on the player's inventory) instead of scrapping. weaponBaseFormID is the
+	// base TESObjectWEAP; modStackID is ExamineMenu::modStack (index of the
+	// stack inside the BGSInventoryItem's linked list).
+	std::uint32_t weaponBaseFormID{ 0 };
+	std::uint32_t modStackID{ 0 };
 };
 
 // One item the native scrap pipeline should grant: staged by the pre-scrap
@@ -61,6 +73,12 @@ static_assert(sizeof(ScrapItemCallbackLayout) == 0x18);
 
 // offsetof(RE::ExamineMenu, moddedInventoryItem) == 0x548 (PostNG / current CommonLibF4 layout).
 inline constexpr std::uintptr_t kExamineMenu_ModdedInventoryItem = 0x548;
+
+// offsetof(RE::ExamineMenu, modStack) == 0x3F4 (std::uint32_t, right after
+// modItem at 0x3F0). Index of the stack (within the examined item's Stack
+// linked list) that the workbench is modifying — used to target the correct
+// inventory stack when detaching mods without scrapping.
+inline constexpr std::uintptr_t kExamineMenu_ModStack = 0x3F4;
 
 // offsetof(RE::ExamineMenu, scrappingArray) == 0x428 on runtime 1.10.163.
 //

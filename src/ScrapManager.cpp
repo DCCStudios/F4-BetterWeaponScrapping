@@ -42,7 +42,8 @@ namespace
 		return std::format("{:08X}", a_fid);
 	}
 
-	void AppendUniqueModPick(std::vector<PendingModPick>& a_out, const RE::BGSMod::Attachment::Mod* a_mod)
+	void AppendUniqueModPick(std::vector<PendingModPick>& a_out, const RE::BGSMod::Attachment::Mod* a_mod,
+		std::uint8_t a_attachIndex)
 	{
 		if (!a_mod) {
 			return;
@@ -63,7 +64,7 @@ namespace
 		if (std::find_if(a_out.begin(), a_out.end(), [fid](const PendingModPick& p) { return p.formID == fid; }) != a_out.end()) {
 			return;
 		}
-		PendingModPick pick{ .formID = fid, .label = ModDisplayName(a_mod, fid) };
+		PendingModPick pick{ .formID = fid, .label = ModDisplayName(a_mod, fid), .attachIndex = a_attachIndex };
 		a_out.push_back(std::move(pick));
 	}
 
@@ -96,7 +97,7 @@ namespace
 
 			auto* mod = RE::TESForm::GetFormByID<RE::BGSMod::Attachment::Mod>(oid.objectID);
 			if (mod) {
-				AppendUniqueModPick(a_outMods, mod);
+				AppendUniqueModPick(a_outMods, mod, oid.index);
 				if (dbg) {
 					logger::info("[BWS]   OID[{}]: objectID={:08X} -> '{}'"sv,
 						i, oid.objectID, ModDisplayName(mod, oid.objectID));
@@ -230,6 +231,12 @@ namespace
 		} else {
 			a_out.weaponDisplayName = "(weapon)";
 		}
+
+		// Identify the exact inventory weapon/stack for the "keep weapon"
+		// detach actions (see PendingWeaponScrap comments).
+		a_out.weaponBaseFormID = static_cast<std::uint32_t>(weap->GetFormID());
+		a_out.modStackID = *reinterpret_cast<const std::uint32_t*>(
+			reinterpret_cast<const std::byte*>(a_menu) + kExamineMenu_ModStack);
 
 		CollectWeaponModsFromInventory(weap, invItem, a_out.mods);
 
