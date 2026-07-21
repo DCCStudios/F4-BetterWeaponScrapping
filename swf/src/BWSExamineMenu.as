@@ -217,10 +217,22 @@ package
 				vis = false;
 			}
 
+			var becameVisible:Boolean = false;
+
 			if (vis != lastVisible)
 			{
 				lastVisible = vis;
 				hintData.ButtonVisible = vis;
+				becameVisible = vis;
+				// Transition log: proves in BetterWeaponScrappingF4SE.log
+				// whether the C++ visibility gate ever fires in-game.
+				try
+				{
+					bws.Log("BWSExamineMenu.swf: hint " + (vis ? "SHOWN" : "hidden"));
+				}
+				catch (errLog:Error)
+				{
+				}
 			}
 
 			if (vis)
@@ -232,6 +244,29 @@ package
 					// Gamepad glyphs are placeholders — the feature is
 					// keyboard/mouse driven, matching the old ImGui hint.
 					hintData.SetButtons(key, "PSN_Y", "Xenon_Y");
+					becameVisible = true;
+				}
+			}
+
+			// The acquired bar renders through the game's separate
+			// ButtonBarMenu movie: native code marshals the hint vector
+			// across movies when SetButtonHintData runs. A hint submitted
+			// while invisible is not reliably re-marshaled by a later
+			// ButtonVisible flip alone, so when OUR hint just turned visible
+			// (or changed key), re-push the current mode's vector through the
+			// menu's own UpdateButtons — our SetButtonHintData wrapper keeps
+			// the hint appended. Deliberately NOT done on hide transitions:
+			// those coincide with the confirm dialog / picker opening, and
+			// resubmitting the workbench bar then could stomp the dialog's
+			// own button bar (natural UpdateButtons calls hide it instead).
+			if (becameVisible)
+			{
+				try
+				{
+					base.UpdateButtons();
+				}
+				catch (err2:Error)
+				{
 				}
 			}
 		}
