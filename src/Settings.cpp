@@ -178,6 +178,8 @@ namespace BWS
 				scrapCueEnabled.store(ParseBool(val, true));
 			} else if (key == "ScrapModHotkey") {
 				scrapModHotkey.store(ParseInt(val, 0x47));
+			} else if (key == "ScrapModGamepadButton") {
+				scrapModGamepadButton.store(ParseInt(val, 0x0040));
 			} else if (key == "SolidBackground") {
 				solidBackground.store(ParseBool(val, false));
 			} else if (key == "HotkeyPromptX") {
@@ -215,6 +217,7 @@ namespace BWS
 		oss << "WrapScrapItem=" << (wrapScrapItemEnabled.load() ? 1 : 0) << '\n';
 		oss << "ShowScrapModsCue=" << (scrapCueEnabled.load() ? 1 : 0) << '\n';
 		oss << "ScrapModHotkey=" << scrapModHotkey.load() << '\n';
+		oss << "ScrapModGamepadButton=" << scrapModGamepadButton.load() << '\n';
 		oss << "SolidBackground=" << (solidBackground.load() ? 1 : 0) << '\n';
 		oss << "HotkeyPromptX=" << hotkeyPromptX.load() << '\n';
 		oss << "HotkeyPromptY=" << hotkeyPromptY.load() << '\n';

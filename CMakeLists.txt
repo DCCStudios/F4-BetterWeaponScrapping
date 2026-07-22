@@ -50,6 +50,7 @@ set(SOURCES
 	src/main.cpp
 	src/Settings.cpp
 	src/BWSMenu.cpp
+	src/GamepadInput.cpp
 	src/ScrapManager.cpp
 	src/ScrapOverlay.cpp
 	src/ScrapModManager.cpp
@@ -61,6 +62,7 @@ set(HEADERS
 	src/PCH.h
 	src/Settings.h
 	src/BWSMenu.h
+	src/GamepadInput.h
 	src/BenchScrapTypes.h
 	src/ScrapManager.h
 	src/ScrapOverlay.h

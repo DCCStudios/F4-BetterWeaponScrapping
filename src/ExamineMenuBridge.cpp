@@ -8,6 +8,7 @@
 #include "Settings.h"
 
 #include "RE/Bethesda/BSFixedString.h"
+#include "RE/Bethesda/BSInputDeviceManager.h"
 #include "RE/Bethesda/BSTArray.h"
 #include "RE/Bethesda/BSTTuple.h"
 #include "RE/Bethesda/TESBoundObjects.h"
@@ -80,11 +81,53 @@ namespace
 	std::atomic<bool> g_nativeGrantInFlight{ false };
 
 	// ------------------------------------------------------- helper: PC key
-	// Human-readable PC key label for the current hotkey VK, matching what the
-	// old ImGui hint displayed ("G", "VK 0x70", ...). Vanilla hints use plain
+	// Short text label for an XINPUT_GAMEPAD_* button mask (the INI setting
+	// ScrapModGamepadButton). Text, not glyphs — the cue TextField renders
+	// $MAIN_Font_Bold, which has no controller-button glyph range.
+	std::string GamepadButtonName(const std::uint32_t a_mask)
+	{
+		switch (a_mask) {
+		case 0x0001: return "DPAD UP";
+		case 0x0002: return "DPAD DOWN";
+		case 0x0004: return "DPAD LEFT";
+		case 0x0008: return "DPAD RIGHT";
+		case 0x0010: return "START";
+		case 0x0020: return "BACK";
+		case 0x0040: return "L3";
+		case 0x0080: return "R3";
+		case 0x0100: return "LB";
+		case 0x0200: return "RB";
+		case 0x1000: return "A";
+		case 0x2000: return "B";
+		case 0x4000: return "X";
+		case 0x8000: return "Y";
+		default:     return std::format("PAD 0x{:X}", a_mask);
+		}
+	}
+
+	// True when the cue should show the gamepad hotkey instead of the
+	// keyboard key: a pad is connected/enabled (the same device state that
+	// flips vanilla prompts to controller art — mods like Auto Gamepad
+	// Switch toggle it at runtime) AND a pad button is configured.
+	bool GamepadHintActive()
+	{
+		const auto* idm = RE::BSInputDeviceManager::GetSingleton();
+		return idm && idm->IsGamepadConnected() &&
+		       BWS::Settings::Get().scrapModGamepadButton.load() != 0;
+	}
+
+	// Human-readable label for the current hotkey, matching what the old
+	// ImGui hint displayed ("G", "VK 0x70", ...). Vanilla hints use plain
 	// strings like "E" / "Wheel up", so single characters render natively.
+	// In gamepad mode the label switches to the configured pad button. The
+	// SWF re-polls GetHintKey every frame, so the cue follows device
+	// switches live.
 	std::string HotkeyDisplayName()
 	{
+		if (GamepadHintActive()) {
+			return GamepadButtonName(BWS::Settings::Get().scrapModGamepadButton.load());
+		}
+
 		const int vk = BWS::Settings::Get().scrapModHotkey.load();
 		if (vk > 0 && vk < 256) {
 			if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) {
@@ -134,6 +177,20 @@ namespace
 		{
 			if (a_params.retVal && a_params.movie && a_params.movie->asMovieRoot) {
 				a_params.movie->asMovieRoot->CreateString(a_params.retVal, HotkeyDisplayName().c_str());
+			}
+		}
+	};
+
+	// bws.IsGamepadActive() — polled every frame alongside GetHintKey; when
+	// true the SWF draws the key label inside a button circle (matching the
+	// controller-button art vanilla prompts use) instead of a bare letter.
+	class IsGamepadActiveFunc : public FunctionHandler
+	{
+	public:
+		void Call(const Params& a_params) override
+		{
+			if (a_params.retVal) {
+				*a_params.retVal = GamepadHintActive();
 			}
 		}
 	};
@@ -279,6 +336,7 @@ namespace
 		registerFn("OpenScrapMods", new OpenScrapModsFunc());
 		registerFn("IsHintVisible", new IsHintVisibleFunc());
 		registerFn("GetHintKey", new GetHintKeyFunc());
+		registerFn("IsGamepadActive", new IsGamepadActiveFunc());
 		registerFn("GetConfigFlags", new GetConfigFlagsFunc());
 		registerFn("Log", new LogFunc());
 

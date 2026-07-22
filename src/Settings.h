@@ -63,6 +63,12 @@ namespace BWS
 		std::atomic<bool> scrapCueEnabled{ true };
 		/** Virtual-key code (e.g. 'G' = 0x47). See WinUser.h VK_* constants. */
 		std::atomic<int> scrapModHotkey{ 0x47 };
+		/**
+		 * Gamepad button that opens the scrap-mod picker while the workbench
+		 * is open (XINPUT_GAMEPAD_* bitmask value; 0 disables). Default
+		 * 0x0040 = left stick click (L3), unused by the vanilla ExamineMenu.
+		 */
+		std::atomic<int> scrapModGamepadButton{ 0x0040 };
 		/** When true, recovery / scrap-mod ImGui windows use opaque HUD background color. */
 		std::atomic<bool> solidBackground{ false };
 

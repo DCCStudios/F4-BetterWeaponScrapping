@@ -4,7 +4,6 @@ package
 	import flash.display.Sprite;
 	import flash.events.Event;
 	import flash.events.MouseEvent;
-	import flash.filters.BlurFilter;
 	import flash.geom.Point;
 	import flash.text.AntiAliasType;
 	import flash.text.TextField;
@@ -31,11 +30,20 @@ package
 		private var cueRoot:Sprite = null;
 		private var cueBg:Sprite = null;
 		private var cueBrackets:Sprite = null;
-		private var cueText:TextField = null;
+		private var keyCircle:Sprite = null;   // pad-mode button ring around the key
+		private var keyText:TextField = null;  // hotkey ("G" / "L3")
+		private var cueText:TextField = null;  // "SCRAP MODS" label
 		private var lastVisible:Boolean = false;
 		private var lastKey:String = "";
+		private var padActive:Boolean = false;
 
-		private static const FONT_SIZE:Number = 18;
+		// The native hint bar's text size is baked into a Flash-authored
+		// TextFormat inside the compiled examine_menu.swf (a DefineEditText
+		// tag), which isn't visible in the decompiled ActionScript source —
+		// there's no numeric constant to read here. 18 read too large, 13
+		// read too small; 16 is a visual middle-ground estimate against the
+		// reference screenshots, not a re-derived value.
+		private static const FONT_SIZE:Number = 16;
 		private static const HUD_GREEN:uint = 0x12FF15;
 
 		// BSBracketClip / MessageHolder defaults (see PromptMenuPanel_5.as:
@@ -47,16 +55,24 @@ package
 		private static const PAD_Y:Number = 3;
 		// The native plate (ButtonHintBar_mc.ShadedBackgroundMethod="Shader")
 		// is a real-time engine shader that blurs/darkens the game world
-		// behind the UI — not a flat fill. We have no access to that shader
-		// from a separately-loaded utility SWF, so this is a deliberate
-		// approximation: a soft-edged translucent plate (BlurFilter below)
-		// rather than a hard-edged rectangle, which is the closest a plain
-		// Sprite fill can get to that look.
-		private static const BG_ALPHA:Number = 0.15;
-		private static const BG_BLUR:Number = 9;
+		// behind the UI — not a flat fill. Every flat-fill approximation
+		// rendered as near-solid black in game regardless of alpha, so the
+		// plate is now invisible: alpha 0. The rectangle is still drawn
+		// because cueBg doubles as the click hit-area (alpha-0 fills keep
+		// their hit-test geometry in Flash).
+		private static const BG_ALPHA:Number = 0.0;
 
 		private static const MARGIN_R:Number = 48;
 		private static const MARGIN_B:Number = 40;
+
+		// Pad-mode button ring: vanilla controller prompts render the button
+		// inside a circle. drawEllipse around the key text approximates the
+		// controller-button art (the real art is a font glyph in the host's
+		// controller-button font, unreachable from this app domain).
+		private static const KEY_GAP:Number = 6;       // key -> label spacing
+		private static const CIRCLE_PAD_X:Number = 3;  // ring padding around key text
+		private static const CIRCLE_PAD_Y:Number = -1;
+		private static const CIRCLE_LINE:Number = 2;
 
 		public function BWSExamineMenu()
 		{
@@ -198,45 +214,65 @@ package
 
 			cueBg = new Sprite();
 			cueBg.mouseEnabled = false;
-			cueBg.filters = [new BlurFilter(BG_BLUR, BG_BLUR, 2)];
 			cueRoot.addChild(cueBg);
-			// The hit area must stay crisp/rectangular for reliable clicks —
-			// hitArea ignores filters anyway, but keep it explicit that this
-			// is independent of cueBg's blurred visual.
+			// cueBg is invisible (alpha-0 fill) but still defines the
+			// rectangular click hit-area for the whole cue.
 			cueRoot.hitArea = cueBg;
 
 			cueBrackets = new Sprite();
 			cueBrackets.mouseEnabled = false;
 			cueRoot.addChild(cueBrackets);
 
-			cueText = new TextField();
-			cueText.autoSize = TextFieldAutoSize.LEFT;
-			cueText.selectable = false;
-			cueText.mouseEnabled = false;
-			// Matches BSButtonHint.SetUpTextFields — vanilla hints use NORMAL,
-			// not ADVANCED, anti-aliasing.
-			cueText.antiAliasType = AntiAliasType.NORMAL;
-			cueText.embedFonts = true;
+			keyCircle = new Sprite();
+			keyCircle.mouseEnabled = false;
+			cueRoot.addChild(keyCircle);
+
 			var fmt:TextFormat = new TextFormat("$MAIN_Font_Bold", FONT_SIZE, HUD_GREEN);
 			fmt.align = TextFormatAlign.LEFT;
-			cueText.defaultTextFormat = fmt;
-			cueText.setTextFormat(fmt);
-			cueText.text = "G SCRAP MODS";
+
+			keyText = makeCueField(fmt);
+			keyText.text = "G";
+			cueText = makeCueField(fmt);
+			cueText.text = "SCRAP MODS";
 			if (cueText.textWidth < 2)
 			{
-				cueText.embedFonts = false;
+				// $MAIN_Font_Bold unavailable in this app domain — fall back
+				// to the device font for BOTH fields so they stay matched.
 				fmt.font = "_sans";
+				keyText.embedFonts = false;
+				keyText.defaultTextFormat = fmt;
+				keyText.setTextFormat(fmt);
+				keyText.text = "G";
+				cueText.embedFonts = false;
 				cueText.defaultTextFormat = fmt;
 				cueText.setTextFormat(fmt);
-				cueText.text = "G SCRAP MODS";
+				cueText.text = "SCRAP MODS";
 				log("BWSExamineMenu.swf: $MAIN_Font_Bold unavailable — using device _sans");
 			}
 
+			cueRoot.addChild(keyText);
 			cueRoot.addChild(cueText);
 			cueRoot.addEventListener(MouseEvent.CLICK, onCueClick);
 			cueRoot.visible = false;
 			host.addChild(cueRoot);
 			log("BWSExamineMenu.swf: vector-bracket SCRAP MODS cue attached");
+		}
+
+		// Shared construction for the two cue text fields (key + label) so
+		// they always use identical font/AA settings.
+		private function makeCueField(fmt:TextFormat):TextField
+		{
+			var tf:TextField = new TextField();
+			tf.autoSize = TextFieldAutoSize.LEFT;
+			tf.selectable = false;
+			tf.mouseEnabled = false;
+			// Matches BSButtonHint.SetUpTextFields — vanilla hints use NORMAL,
+			// not ADVANCED, anti-aliasing.
+			tf.antiAliasType = AntiAliasType.NORMAL;
+			tf.embedFonts = true;
+			tf.defaultTextFormat = fmt;
+			tf.setTextFormat(fmt);
+			return tf;
 		}
 
 		// Reproduces Shared.AS3.BSBracketClip's BR_HORIZONTAL path: a short
@@ -261,14 +297,39 @@ package
 
 		private function layoutCue():void
 		{
-			if (!cueRoot || !cueText || !cueBg || !cueBrackets || !stage)
+			if (!cueRoot || !cueText || !keyText || !cueBg || !cueBrackets || !keyCircle || !stage)
 			{
 				return;
 			}
 
-			// Leave room for the vertical bracket line + gap before the text.
-			cueText.x = PAD_X + BRACKET_LINE_WIDTH + 4;
+			// Leave room for the vertical bracket line + gap before the key.
+			// In pad mode the button ring needs extra clearance on both sides
+			// of the key text.
+			var ringPad:Number = padActive ? (CIRCLE_PAD_X + CIRCLE_LINE) : 0;
+			keyText.x = PAD_X + BRACKET_LINE_WIDTH + 4 + ringPad;
+			keyText.y = 0;
+			cueText.x = keyText.x + keyText.textWidth + 4 + ringPad + KEY_GAP;
 			cueText.y = 0;
+
+			// TextField metrics: text is inset ~2px from the field origin on
+			// each axis (the standard gutter), hence the +2 offsets below.
+			keyCircle.graphics.clear();
+			if (padActive)
+			{
+				var kw:Number = keyText.textWidth + CIRCLE_PAD_X * 2;
+				var kh:Number = keyText.textHeight + CIRCLE_PAD_Y * 2;
+				// Single letters ("A", "B") should sit in a true circle, not
+				// a squashed oval — widen to at least the height.
+				if (kw < kh)
+				{
+					kw = kh;
+				}
+				var kcx:Number = keyText.x + 2 + keyText.textWidth * 0.5;
+				var kcy:Number = keyText.y + 2 + keyText.textHeight * 0.5;
+				keyCircle.graphics.lineStyle(
+					CIRCLE_LINE, HUD_GREEN, 1.0, true, "normal", "round");
+				keyCircle.graphics.drawEllipse(kcx - kw * 0.5, kcy - kh * 0.5, kw, kh);
+			}
 
 			var textW:Number = cueText.textWidth + 4;
 			var textH:Number = cueText.textHeight + 4;
@@ -327,6 +388,16 @@ package
 				key = "G";
 			}
 
+			var pad:Boolean = false;
+			try
+			{
+				pad = Boolean(bws.IsGamepadActive());
+			}
+			catch (errPad:Error)
+			{
+				pad = false;
+			}
+
 			if (vis != lastVisible)
 			{
 				lastVisible = vis;
@@ -336,12 +407,12 @@ package
 			cueRoot.visible = vis;
 			if (vis)
 			{
-				var label:String = key + " SCRAP MODS";
-				if (key != lastKey || cueText.text != label)
+				if (key != lastKey)
 				{
 					lastKey = key;
-					cueText.text = label;
+					keyText.text = key;
 				}
+				padActive = pad;
 				layoutCue();
 			}
 		}

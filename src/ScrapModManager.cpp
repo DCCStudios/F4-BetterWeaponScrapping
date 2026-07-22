@@ -67,13 +67,26 @@ namespace
 		auto* vtbl = *reinterpret_cast<void***>(raw);
 		using VoidFn = void (*)(void*);
 
+		// Rebuild the menu's cached crafting inventory FIRST — the workbench
+		// requirement/component counts come from
+		// WorkbenchMenuBase::optimizedAutoBuildInv (a snapshot built at menu
+		// open), not from the live player inventory. Without this, granted
+		// components only show up after re-entering the workbench.
+		// Old-gen ID 769581 = WorkbenchMenuBase::UpdateOptimizedAutoBuildInv
+		// (commonlibf4-main VariantID{ 769581, 2224955 }).
+		{
+			using UpdateInvFn = void (*)(void*);
+			static REL::Relocation<UpdateInvFn> updateInv{ REL::ID(769581) };
+			updateInv(raw);
+		}
+
 		constexpr std::size_t kVIdx_UpdateMenu = 0x15;
 		reinterpret_cast<VoidFn>(vtbl[kVIdx_UpdateMenu])(raw);
 
 		constexpr std::size_t kVIdx_UpdateModChoiceList = 0x3F;
 		reinterpret_cast<VoidFn>(vtbl[kVIdx_UpdateModChoiceList])(raw);
 
-		logger::info("[BWS] RefreshExamineMenuModList: called UpdateMenu + UpdateModChoiceList");
+		logger::info("[BWS] RefreshExamineMenuModList: called UpdateOptimizedAutoBuildInv + UpdateMenu + UpdateModChoiceList");
 	}
 
 	struct ModIngredientLine
@@ -103,6 +116,15 @@ namespace
 	std::vector<PendingModPick> g_mods;
 	std::size_t                 g_confirmIndex{ 0 };
 	std::vector<ModIngredientLine> g_confirmLines;
+
+	// Picker mode toggle. Scrap mode (false): detach the picked mod and
+	// grant its COBJ crafting components. Remove mode (true): detach the
+	// picked mod and return it to the inventory as its loose mod item —
+	// nothing is scrapped. Session-persistent (survives closing the picker).
+	bool g_removeMode{ false };
+	// Loose-item label shown on the confirm page while in Remove mode
+	// (precomputed when the mod is picked).
+	std::string g_confirmLooseLabel;
 
 	struct InvLooseModPick
 	{
@@ -961,6 +983,58 @@ namespace
 		return false;
 	}
 
+	// Resolves the loose MISC item for a picked mod. Null when the OMOD has
+	// no loose-item mapping (default/template mods never reach the picker,
+	// so in practice this should always resolve).
+	RE::TESObjectMISC* FindLooseItemForPick(const PendingModPick& a_pick)
+	{
+		auto* mod = RE::TESForm::GetFormByID<RE::BGSMod::Attachment::Mod>(a_pick.formID);
+		if (!mod) {
+			return nullptr;
+		}
+		auto& loose = RE::BGSMod::Attachment::GetAllLooseMods();
+		if (auto it = loose.find(mod); it != loose.end()) {
+			return it->second;
+		}
+		return nullptr;
+	}
+
+	// Remove-mode action: detach the picked mod from the examined weapon and
+	// return it to the player's inventory as its loose mod item (same grant
+	// path as every other BWS grant: deferred to the game thread, followed by
+	// a full menu refresh so the workbench UI updates in place).
+	bool PerformAttachedModRemove(RE::ExamineMenu* a_menu, const PendingModPick& a_pick)
+	{
+		auto* looseItem = FindLooseItemForPick(a_pick);
+		if (!RemoveModFromExamineInstance(a_menu, a_pick.formID)) {
+			return false;
+		}
+
+		if (looseItem) {
+			const std::uint32_t looseFID = static_cast<std::uint32_t>(looseItem->GetFormID());
+			if (const auto* tasks = F4SE::GetTaskInterface()) {
+				tasks->AddTask([looseFID]() {
+					auto* pl = RE::PlayerCharacter::GetSingleton();
+					auto* bound = RE::TESForm::GetFormByID<RE::TESBoundObject>(looseFID);
+					if (pl && bound) {
+						pl->AddObjectToContainer(bound, nullptr, 1, nullptr,
+							static_cast<RE::ITEM_REMOVE_REASON>(0));
+					}
+					RefreshExamineMenuModList();
+				});
+			}
+		} else {
+			logger::warn("[BWS] remove-mode: mod {:08X} '{}' has no loose item — detached without grant"sv,
+				a_pick.formID, a_pick.label);
+		}
+
+		if (BWS::Settings::Get().showApplyHudMessage.load()) {
+			RE::SendHUDMessage::ShowHUDMessage(
+				"Better Weapon Scrapping: mod removed to inventory.", nullptr, false, false);
+		}
+		return true;
+	}
+
 	void TryBeginSwapOrScrapAttached(RE::ExamineMenu* a_menu, const PendingModPick& a_pick)
 	{
 		g_swapCandidates.clear();
@@ -1383,8 +1457,12 @@ namespace BWS::ScrapModManager
 			return;
 		}
 
+		// One-shot focus grab per flow open (see SetNextWindowFocus below).
+		static bool s_focusApplied = false;
+
 		const auto phase = g_phase.load(std::memory_order_acquire);
 		if (phase == FlowPhase::kNone) {
+			s_focusApplied = false;
 			return;
 		}
 
@@ -1396,7 +1474,16 @@ namespace BWS::ScrapModManager
 
 		const ImVec2 center = ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
 		ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-		ImGui::SetNextWindowFocus();
+
+		// Focus ONCE when the flow opens — never per-frame. A per-frame
+		// SetNextWindowFocus re-focuses the parent window every frame, which
+		// rips gamepad/keyboard nav back out of child windows (the mod list)
+		// the instant the user navigates into them: the child highlights its
+		// first item for one frame, then focus snaps back to the parent.
+		if (!s_focusApplied) {
+			ImGui::SetNextWindowFocus();
+			s_focusApplied = true;
+		}
 
 		const float winW = std::round(620.0f * sc);
 		ImGui::SetNextWindowSize(ImVec2(winW, 0.0f), ImGuiCond_Always);
@@ -1411,18 +1498,54 @@ namespace BWS::ScrapModManager
 		const float swapH = std::min(std::round(240.0f * sc), io.DisplaySize.y * 0.3f);
 
 		if (phase == FlowPhase::kPicker) {
-			ImGui::TextUnformatted("Scrap Mod \xe2\x80\x94 Select a Mod");
+			ImGui::TextUnformatted(g_removeMode
+			                           ? "Remove Mod \xe2\x80\x94 Select a Mod"
+			                           : "Scrap Mod \xe2\x80\x94 Select a Mod");
 			ImGui::Separator();
 			ImGui::TextWrapped("%s", g_weaponName.c_str());
 			ImGui::Spacing();
-			ImGui::TextUnformatted("Mods on this weapon (removes from weapon and grants components):");
+
+			// Mode toggle: Scrap (grant components) vs Remove (return the
+			// loose mod item to the inventory). Session-persistent.
+			ImGui::Checkbox("Remove mode", &g_removeMode);
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip(
+					"Checked: selected mods are detached and returned to your inventory as loose mods.\n"
+					"Unchecked: selected mods are detached and scrapped for crafting components.");
+			}
+			ImGui::SameLine();
+			ImGui::TextDisabled(g_removeMode
+			                        ? "\xe2\x80\x94 detach and return the loose mod to your inventory"
+			                        : "\xe2\x80\x94 detach and scrap the mod for components");
+			ImGui::Spacing();
+
+			ImGui::TextUnformatted(g_removeMode
+			                           ? "Mods on this weapon (removes from weapon, loose mod goes to inventory):"
+			                           : "Mods on this weapon (removes from weapon and grants components):");
 			ImGui::BeginChild("##mod_list", ImVec2(-FLT_MIN, listH), ImGuiChildFlags_Borders);
 			for (std::size_t i = 0; i < g_mods.size(); ++i) {
 				const char* label = g_mods[i].label.empty() ? "(mod)" : g_mods[i].label.c_str();
 				ImGui::PushID(static_cast<int>(i));
 				if (ImGui::Button(label, ImVec2(-FLT_MIN, 0))) {
 					g_confirmIndex = i;
-					BuildIngredientLinesForPick(g_mods[i], g_confirmLines);
+					if (g_removeMode) {
+						// Remove mode shows the loose item the player will
+						// get back instead of component yields.
+						g_confirmLines.clear();
+						g_confirmLooseLabel.clear();
+						if (auto* looseItem = FindLooseItemForPick(g_mods[i])) {
+							if (const auto* full = looseItem->As<RE::TESFullName>()) {
+								if (const char* n = full->fullName.c_str(); n && n[0]) {
+									g_confirmLooseLabel = n;
+								}
+							}
+						}
+						if (g_confirmLooseLabel.empty()) {
+							g_confirmLooseLabel = g_mods[i].label;
+						}
+					} else {
+						BuildIngredientLinesForPick(g_mods[i], g_confirmLines);
+					}
 					g_phase.store(FlowPhase::kConfirm, std::memory_order_release);
 				}
 				ImGui::PopID();
@@ -1581,6 +1704,33 @@ namespace BWS::ScrapModManager
 		} else if (phase == FlowPhase::kConfirm) {
 			if (g_confirmIndex >= g_mods.size()) {
 				g_phase.store(FlowPhase::kPicker, std::memory_order_release);
+			} else if (g_removeMode) {
+				// Remove mode: detach the mod and return the loose item.
+				const auto& pick = g_mods[g_confirmIndex];
+				ImGui::TextUnformatted("Confirm Remove Mod");
+				ImGui::Separator();
+				ImGui::TextWrapped("Remove %s from this weapon?", pick.label.empty() ? "(mod)" : pick.label.c_str());
+				ImGui::Spacing();
+				ImGui::TextUnformatted("You will receive:");
+				ImGui::BulletText("1 x %s", g_confirmLooseLabel.empty() ? "(loose mod)" : g_confirmLooseLabel.c_str());
+				ImGui::Spacing();
+				if (ImGui::Button("Confirm", ImVec2(btnW, 0))) {
+					RE::ExamineMenu* menu{};
+					{
+						std::lock_guard lk(g_examineMtx);
+						menu = g_examineMenuPtr;
+					}
+					if (menu) {
+						// No swap-suggest step here: the player gets the mod
+						// back intact, so there is nothing to preserve.
+						PerformAttachedModRemove(menu, pick);
+						RefreshModsAfterRemoval(pick.formID);
+					}
+				}
+				ImGui::SameLine();
+				if (ImGui::Button("Back", ImVec2(btnW, 0))) {
+					g_phase.store(FlowPhase::kPicker, std::memory_order_release);
+				}
 			} else {
 				const auto& pick = g_mods[g_confirmIndex];
 				ImGui::TextUnformatted("Confirm Scrap Mod");
@@ -1610,6 +1760,30 @@ namespace BWS::ScrapModManager
 				if (ImGui::Button("Back", ImVec2(btnW, 0))) {
 					g_phase.store(FlowPhase::kPicker, std::memory_order_release);
 				}
+			}
+		}
+
+		// Gamepad B (or keyboard Backspace via ImGui nav) = back one step /
+		// close, mirroring the on-screen Back/Close buttons so a controller
+		// never gets stuck in the flow.
+		if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) {
+			switch (phase) {
+			case FlowPhase::kConfirm:
+			case FlowPhase::kSwapSuggest:
+				g_swapCandidates.clear();
+				g_swapSlotIndex = -1;
+				g_phase.store(FlowPhase::kPicker, std::memory_order_release);
+				break;
+			case FlowPhase::kInvLooseConfirm:
+				g_phase.store(FlowPhase::kInvLoosePicker, std::memory_order_release);
+				break;
+			case FlowPhase::kInvLoosePicker:
+				g_phase.store(FlowPhase::kPicker, std::memory_order_release);
+				break;
+			case FlowPhase::kPicker:
+			default:
+				CloseFlow();
+				break;
 			}
 		}
 

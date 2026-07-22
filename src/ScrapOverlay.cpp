@@ -1,6 +1,7 @@
 #include "PCH.h"
 #include "ScrapOverlay.h"
 #include "ExamineMenuBridge.h"
+#include "GamepadInput.h"
 #include "ScrapModManager.h"
 #include "Settings.h"
 #include "BWS_RendererData.h"
@@ -113,6 +114,22 @@ namespace
 		auto* raw = menu.get();
 		auto* vtbl = *reinterpret_cast<void***>(raw);
 		using VoidFn = void (*)(void*);
+
+		// Rebuild the menu's cached crafting inventory FIRST. The workbench
+		// requirement/component counts are NOT read live from the player —
+		// they come from WorkbenchMenuBase::optimizedAutoBuildInv, a
+		// BGSInventoryList snapshot built when the menu opens. Items we add
+		// with AddObjectToContainer are invisible to the menu until this
+		// snapshot is rebuilt, which is why counts previously only updated
+		// after leaving and re-entering the workbench.
+		// Old-gen (1.10.163) Address Library ID 769581 =
+		// WorkbenchMenuBase::UpdateOptimizedAutoBuildInv, cross-checked
+		// against commonlibf4-main's VariantID{ 769581, 2224955 }.
+		{
+			using UpdateInvFn = void (*)(void*);
+			static REL::Relocation<UpdateInvFn> updateInv{ REL::ID(769581) };
+			updateInv(raw);
+		}
 
 		constexpr std::size_t kVIdx_UpdateMenu = 0x15;
 		reinterpret_cast<VoidFn>(vtbl[kVIdx_UpdateMenu])(raw);
@@ -1035,7 +1052,11 @@ namespace
 
 	static void RenderScrapModal()
 	{
+		// One-shot focus grab per popup open (see SetNextWindowFocus below).
+		static bool s_focusApplied = false;
+
 		if (!g_popupVisible.load()) {
+			s_focusApplied = false;
 			return;
 		}
 
@@ -1054,7 +1075,16 @@ namespace
 		ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
 		const float winW = std::round(620.0f * sc);
 		ImGui::SetNextWindowSize(ImVec2(winW, 0.0f), ImGuiCond_Always);
-		ImGui::SetNextWindowFocus();
+
+		// Focus ONCE when the popup opens — never per-frame. A per-frame
+		// SetNextWindowFocus re-focuses the parent window every frame, which
+		// rips gamepad/keyboard nav back out of child windows (the mod list)
+		// the instant the user navigates into them: the child highlights its
+		// first item for one frame, then focus snaps back to the parent.
+		if (!s_focusApplied) {
+			ImGui::SetNextWindowFocus();
+			s_focusApplied = true;
+		}
 
 		ImGui::Begin(
 			"##bws_weapon_scrap",
@@ -1230,10 +1260,12 @@ namespace
 
 			// Second row: keep the weapon, just strip its mods. Only makes
 			// sense when the weapon actually has removable mods.
+			// NOTE: plain-ASCII labels only — the game-font atlas has no
+			// U+2192 arrow glyph (it rendered as '?').
 			if (!g_active.mods.empty()) {
 				ImGui::Spacing();
-				ImGui::TextDisabled("Keep the weapon \xe2\x80\x94 remove its mods only:");
-				if (ImGui::Button("Remove \xe2\x86\x92 Inventory", ImVec2(std::round(btnW * 1.4f), 0))) {
+				ImGui::TextDisabled("Keep the weapon \xe2\x80\x94 detach ALL its mods and get back:");
+				if (ImGui::Button("Detach Mods, Keep as Items", ImVec2(0, 0))) {
 					// Detach all mods; return each as its loose mod item.
 					RemoveModsKeepWeapon(RemoveYield::kLooseItems);
 				}
@@ -1243,7 +1275,7 @@ namespace
 						"The weapon stays and reverts to its default parts.");
 				}
 				ImGui::SameLine();
-				if (ImGui::Button("Remove \xe2\x86\x92 Components", ImVec2(std::round(btnW * 1.4f), 0))) {
+				if (ImGui::Button("Detach Mods, Scrap for Parts", ImVec2(0, 0))) {
 					// Detach all mods; break each into crafting components.
 					RemoveModsKeepWeapon(RemoveYield::kComponents);
 				}
@@ -1261,6 +1293,12 @@ namespace
 			if (ImGui::Button("Skip", ImVec2(btnW, 0))) {
 				DismissPopup();
 			}
+		}
+
+		// Gamepad B = dismiss (same as Cancel/Skip). In pre-scrap mode the
+		// weapon is untouched, so closing is always safe.
+		if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) {
+			DismissPopup();
 		}
 
 		ImGui::End();
@@ -1298,6 +1336,11 @@ namespace
 		ImGuiIO& io = ImGui::GetIO();
 		io.IniFilename = nullptr;
 		io.LogFilename = nullptr;
+		// Full controller + keyboard navigation for every BWS menu. The
+		// Win32 backend polls XInput itself (dynamically resolved via
+		// LoadLibrary/GetProcAddress, so it is NOT affected by our IAT
+		// suppression hook) and feeds ImGui nav events when this flag is on.
+		io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad | ImGuiConfigFlags_NavEnableKeyboard;
 
 		ImGui_ImplWin32_Init(g_hwnd);
 		ImGui_ImplDX11_Init(g_device, g_deviceCtx);
@@ -1372,6 +1415,12 @@ namespace
 
 		g_initialized.store(true);
 		logger::info("Better Weapon Scrapping: ImGui overlay initialized (RendererData + HUDMenu::PostDisplay)"sv);
+
+		// Gamepad: hide controller input from the game while a BWS menu is
+		// open, and watch for the "open scrap-mod picker" pad button. Done
+		// here (first HUD frame) so every other plugin's own XInput IAT pass
+		// has already run and gets chained, not clobbered.
+		BWS::GamepadInput::Install();
 		spdlog::default_logger()->flush();
 	}
 
@@ -1469,6 +1518,15 @@ namespace
 				return CallWindowProcA(g_origWndProc, hwnd, msg, wParam, lParam);
 			}
 
+			// TAB also closes our menus — but unlike ESC it must be SWALLOWED:
+			// TAB is "BACK" inside the workbench ExamineMenu, so forwarding it
+			// would close our menu AND back the player out of the workbench in
+			// the same press.
+			if (msg == WM_KEYDOWN && wParam == VK_TAB) {
+				DismissAllImGuiMenus();
+				return 0;
+			}
+
 			if (msg == WM_ACTIVATEAPP && wParam == FALSE) {
 				DismissAllImGuiMenus();
 				return CallWindowProcA(g_origWndProc, hwnd, msg, wParam, lParam);
@@ -1531,6 +1589,11 @@ void ScrapOverlay::QueuePending(PendingWeaponScrap a_pending)
 {
 	std::lock_guard lk(g_queueMtx);
 	g_pendingQueue.push_back(std::move(a_pending));
+}
+
+bool ScrapOverlay::IsPopupVisible()
+{
+	return g_popupVisible.load();
 }
 
 void ScrapOverlay::ForceDismiss()
