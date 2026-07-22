@@ -42,6 +42,25 @@ namespace BWS
 
 		/** Selective mod removal at workbench Examine menu (ImGui flow + hotkey). */
 		std::atomic<bool> enableScrapMod{ true };
+
+		/**
+		 * Bisect switch for the post-workbench control-lock / hidden-UI bug:
+		 * when false, the Scaleform callback does nothing (no root.bws code
+		 * object, no child SWF loader, no ScrapItem wrap, no cue). Leaves all
+		 * DLL-side hooks active, so one test cleanly splits "SWF injection"
+		 * from "native hooks" as the cause. Default on.
+		 *
+		 * Confirmed 2026-07-22: with this off the workbench exit is fully
+		 * healthy (controls, interaction UI, screen effect all restored), so
+		 * the bug lives somewhere inside the injection. The two flags below
+		 * bisect within it; the SWF polls them via bws.GetConfigFlags().
+		 */
+		std::atomic<bool> swfInjectionEnabled{ true };
+
+		/** Injected SWF: wrap BGSCodeObj.ScrapItem (pre-scrap intercept). */
+		std::atomic<bool> wrapScrapItemEnabled{ true };
+		/** Injected SWF: attach the clickable SCRAP MODS cue to the menu. */
+		std::atomic<bool> scrapCueEnabled{ true };
 		/** Virtual-key code (e.g. 'G' = 0x47). See WinUser.h VK_* constants. */
 		std::atomic<int> scrapModHotkey{ 0x47 };
 		/** When true, recovery / scrap-mod ImGui windows use opaque HUD background color. */

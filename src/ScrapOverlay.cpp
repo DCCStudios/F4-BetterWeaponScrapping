@@ -1417,6 +1417,8 @@ namespace
 			}
 		}
 
+		BWS::ScrapModManager::TickPostExamineInputHeal();
+
 		RenderScrapModal();
 		BWS::ScrapModManager::Draw();
 

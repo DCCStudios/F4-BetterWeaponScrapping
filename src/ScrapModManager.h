@@ -39,4 +39,12 @@ namespace BWS::ScrapModManager
 
 	/** Opens the scrap-mod picker (button-bar hint click / external callers). */
 	void OpenPickerFromExternal();
+
+	/**
+	 * Per-frame heal after leaving ExamineMenu. Must NOT clear
+	 * PlayerControls::blockPlayerInput inside the close event — that races
+	 * ButtonBarMenu teardown and leaves activate/interaction prompts hidden
+	 * for the rest of the session. Call from HUD PostDisplay instead.
+	 */
+	void TickPostExamineInputHeal();
 }

@@ -170,6 +170,12 @@ namespace BWS
 				debugLogging.store(ParseBool(val, false));
 			} else if (key == "EnableScrapMod") {
 				enableScrapMod.store(ParseBool(val, true));
+			} else if (key == "EnableExamineMenuInjection") {
+				swfInjectionEnabled.store(ParseBool(val, true));
+			} else if (key == "WrapScrapItem") {
+				wrapScrapItemEnabled.store(ParseBool(val, true));
+			} else if (key == "ShowScrapModsCue") {
+				scrapCueEnabled.store(ParseBool(val, true));
 			} else if (key == "ScrapModHotkey") {
 				scrapModHotkey.store(ParseInt(val, 0x47));
 			} else if (key == "SolidBackground") {
@@ -205,6 +211,9 @@ namespace BWS
 		oss << "UseNativeGrant=" << (useNativeGrant.load() ? 1 : 0) << '\n';
 		oss << "DebugLogging=" << (debugLogging.load() ? 1 : 0) << '\n';
 		oss << "EnableScrapMod=" << (enableScrapMod.load() ? 1 : 0) << '\n';
+		oss << "EnableExamineMenuInjection=" << (swfInjectionEnabled.load() ? 1 : 0) << '\n';
+		oss << "WrapScrapItem=" << (wrapScrapItemEnabled.load() ? 1 : 0) << '\n';
+		oss << "ShowScrapModsCue=" << (scrapCueEnabled.load() ? 1 : 0) << '\n';
 		oss << "ScrapModHotkey=" << scrapModHotkey.load() << '\n';
 		oss << "SolidBackground=" << (solidBackground.load() ? 1 : 0) << '\n';
 		oss << "HotkeyPromptX=" << hotkeyPromptX.load() << '\n';

@@ -138,6 +138,29 @@ namespace
 		}
 	};
 
+	// bws.GetConfigFlags() — feature bitmask polled once by the SWF at
+	// inject time, driving the intra-injection bisect of the broken-exit
+	// bug without SWF rebuilds:
+	//   bit 0 (1) = wrap BGSCodeObj.ScrapItem
+	//   bit 1 (2) = attach the SCRAP MODS cue sprite
+	class GetConfigFlagsFunc : public FunctionHandler
+	{
+	public:
+		void Call(const Params& a_params) override
+		{
+			if (a_params.retVal) {
+				std::uint32_t flags = 0;
+				if (BWS::Settings::Get().wrapScrapItemEnabled.load()) {
+					flags |= 1u;
+				}
+				if (BWS::Settings::Get().scrapCueEnabled.load()) {
+					flags |= 2u;
+				}
+				*a_params.retVal = flags;
+			}
+		}
+	};
+
 	// bws.OpenScrapMods() — click handler for the button-bar hint. Same flow
 	// as the keyboard hotkey. Deferred to the game task queue so the picker
 	// state flips outside Scaleform's advance.
@@ -224,6 +247,14 @@ namespace
 			return true;
 		}
 
+		// Bisect switch (EnableExamineMenuInjection=0): skip ALL Scaleform
+		// work so a single in-game test can tell SWF-injection bugs apart
+		// from native-hook bugs.
+		if (!BWS::Settings::Get().swfInjectionEnabled.load()) {
+			logger::warn("[BWS] ExamineMenuBridge: injection DISABLED via EnableExamineMenuInjection=0 (bisect mode)"sv);
+			return true;
+		}
+
 		logger::info("[BWS] ExamineMenuBridge: injecting into {}"sv, kHostSWF);
 
 		Value rootObj;
@@ -248,6 +279,7 @@ namespace
 		registerFn("OpenScrapMods", new OpenScrapModsFunc());
 		registerFn("IsHintVisible", new IsHintVisibleFunc());
 		registerFn("GetHintKey", new GetHintKeyFunc());
+		registerFn("GetConfigFlags", new GetConfigFlagsFunc());
 		registerFn("Log", new LogFunc());
 
 		rootObj.SetMember("bws", codeObj);

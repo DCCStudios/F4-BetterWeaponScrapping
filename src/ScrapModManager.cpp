@@ -13,6 +13,7 @@
 #include "RE/Bethesda/Events.h"
 #include "RE/Bethesda/ControlMap.h"
 #include "RE/Bethesda/FormComponents.h"
+#include "RE/Bethesda/PlayerControls.h"
 #include "RE/Bethesda/TESBoundObjects.h"
 #include "RE/Bethesda/TESDataHandler.h"
 #include "RE/Bethesda/TESForms.h"
@@ -21,6 +22,7 @@
 #include "RE/Bethesda/UIMessage.h"
 #include "RE/Bethesda/UIMessageQueue.h"
 #include "RE/Bethesda/SendHUDMessage.h"
+#include "RE/Bethesda/UserEvents.h"
 
 #include "F4SE/API.h"
 #include "F4SE/Interfaces.h"
@@ -737,6 +739,101 @@ namespace
 	// stranded menuMode from locking player controls after the workbench.
 	std::uint32_t g_scrapModMenuModeLayers{ 0 };
 
+	// After ExamineMenu closes, wait for the engine / FallUI to finish
+	// restoring PromptMenu before we touch blockPlayerInput. Clearing that
+	// flag too early (or without re-showing PromptMenu) left activate /
+	// interaction prompts missing for the rest of the session.
+	constexpr std::uint32_t kPostExamineHealDelayFrames = 90;
+	std::atomic<std::uint32_t> g_postExamineHealFrames{ 0 };
+
+	// Second diagnostic-only pass ~3s after the heal tick, to see whether
+	// whatever is hiding the interaction UI ever self-recovers, or is
+	// permanently stuck (which points at a latched flag, not a timing race).
+	constexpr std::uint32_t kDiagRecheckDelayFrames = 180;
+	std::atomic<std::uint32_t> g_diagRecheckFrames{ 0 };
+
+	// ------------------------------------------------------------ HUD mode
+	// Crosshair / activate-prompt visibility is gated by the engine's HUD
+	// mode stack (SendHUDMessage::Push/PopHUDMode). Every GameMenuBase menu
+	// pushes menuHUDMode in OnAddedToMenuStack and pops it in
+	// OnRemovedFromMenuStack. If ExamineMenu's pop is ever skipped, the
+	// interaction UI stays hidden for the whole session while all menus
+	// still report healthy — exactly the observed bug signature.
+	//
+	// IDs are the old-gen (1.10.163) line, cross-checked against the
+	// commonlibf4-main VariantID table where ShowHUDMessage{1163005,...}
+	// matches our vendored SendHUDMessage.h REL::ID(1163005).
+	void PushHUDModeByName(const RE::HUDModeType& a_mode)
+	{
+		using func_t = void (*)(const RE::HUDModeType&);
+		static REL::Relocation<func_t> func{ REL::ID(1321764) };
+		func(a_mode);
+	}
+
+	void PopHUDModeByName(const RE::HUDModeType& a_mode)
+	{
+		using func_t = void (*)(const RE::HUDModeType&);
+		static REL::Relocation<func_t> func{ REL::ID(1495042) };
+		func(a_mode);
+	}
+
+	// menuHUDMode string captured from the closing ExamineMenu, consumed by
+	// the recheck tick if the broken-exit signature was detected.
+	std::string g_examineHudModeStr;
+	// Set when the heal tick found blockPlayerInput still stuck — the
+	// reliable marker of a broken exit in every captured log so far.
+	std::atomic<bool> g_exitLookedBroken{ false };
+
+	// Not just "is the menu on the stack" (GetMenuOpen/OnStack) — a menu can
+	// remain on-stack yet render nothing if passesTopMenuTest / menuCanBeVisible
+	// got latched false while ExamineMenu was on top and never recalculated
+	// on close. Dumps the live menu stack plus those flags for the two menus
+	// most likely to host the crosshair/activation cue (HUDMenu, ButtonBarMenu)
+	// so we can tell a "closed" menu apart from an "open but invisible" one.
+	void LogMenuDiagnostics(const char* a_tag)
+	{
+		auto* ui = RE::UI::GetSingleton();
+		if (!ui) {
+			logger::warn("[BWS] menu-diag [{}]: no UI singleton"sv, a_tag);
+			return;
+		}
+
+		std::string stackNames;
+		for (const auto& m : ui->menuStack) {
+			if (!m) {
+				continue;
+			}
+			if (!stackNames.empty()) {
+				stackNames += ", ";
+			}
+			stackNames += m->menuName.c_str() ? m->menuName.c_str() : "?";
+		}
+		logger::info("[BWS] menu-diag [{}]: stack=[{}]"sv, a_tag, stackNames);
+		// Engine-global pause/visibility counters: any of these latched
+		// nonzero after the workbench closes would also suppress HUD parts.
+		logger::info(
+			"[BWS] menu-diag [{}]: menuMode={} itemMenuMode={} freezeFrameBG={} freezeFramePause={} pauseMenuDisableCt={}"sv,
+			a_tag, ui->menuMode, ui->itemMenuMode.load_unchecked(), ui->freezeFrameMenuBG,
+			ui->freezeFramePause, ui->pauseMenuDisableCt.load_unchecked());
+
+		const auto dumpMenu = [&](const char* a_name) {
+			const RE::BSFixedString fixed{ a_name };
+			const auto menu = ui->GetMenu(fixed);
+			if (!menu) {
+				logger::info("[BWS] menu-diag [{}]: {} = <not registered>"sv, a_tag, a_name);
+				return;
+			}
+			logger::info(
+				"[BWS] menu-diag [{}]: {} onStack={} passesTopMenuTest={} menuCanBeVisible={} "
+				"displayEnabled={} advanceCt={}"sv,
+				a_tag, a_name, menu->OnStack(), menu->passesTopMenuTest, menu->menuCanBeVisible,
+				menu->IsMenuDisplayEnabled(), menu->advanceWithoutRenderCount.load_unchecked());
+		};
+		dumpMenu("HUDMenu");
+		dumpMenu("ButtonBarMenu");
+		dumpMenu("PromptMenu");
+	}
+
 	void ForceReleaseInputGuardsImpl()
 	{
 		if (auto* ui = RE::UI::GetSingleton()) {
@@ -950,50 +1047,125 @@ namespace
 						g_examineMenuPtr = nullptr;
 					}
 				} else {
+					// Root-caused via diagnostics (not a guess): blockPlayerInput
+					// stayed true for ~4s after ExamineMenu closed and interaction
+					// prompts never returned even after that, while ButtonBarMenu's
+					// own onStack/passesTopMenuTest/menuCanBeVisible flags were
+					// healthy the whole time. That means native teardown itself was
+					// stalling — most likely waiting on our injected child SWF
+					// (BWSExamineMenu.swf, still ticking its own ENTER_FRAME loop
+					// and still attached under ExamineMenu's root) to fully unload
+					// before it considers the menu's Scaleform resources released.
+					// Force-unload it here, synchronously, while ExamineMenu's own
+					// Scaleform movie is still guaranteed alive (this IS the event
+					// notifying us it's closing) — BEFORE any of our own C++-side
+					// teardown, so native cleanup isn't left waiting on us at all.
+					if (auto* ui = RE::UI::GetSingleton()) {
+						static const RE::BSFixedString kExamine{ "ExamineMenu" };
+						if (const auto closingMenu = ui->GetMenu(kExamine)) {
+							// Record the HUD mode this menu pushed on open.
+							// ExamineMenu derives from GameMenuBase (it has a
+							// button bar / shader FX / menuHUDMode); the pop
+							// happens in OnRemovedFromMenuStack, and if that
+							// is ever skipped the crosshair + activate
+							// prompts stay hidden all session.
+							auto* gmb = static_cast<RE::GameMenuBase*>(closingMenu.get());
+							g_examineHudModeStr.clear();
+							if (gmb->menuHUDMode.has_value()) {
+								if (const char* s = gmb->menuHUDMode.value().modeString.c_str()) {
+									g_examineHudModeStr = s;
+								}
+							}
+							logger::info("[BWS] ExamineMenu closing: menuHUDMode='{}'"sv,
+								g_examineHudModeStr.empty() ? "<none>" : g_examineHudModeStr);
+
+							if (closingMenu->uiMovie && closingMenu->uiMovie->asMovieRoot) {
+								auto* root = closingMenu->uiMovie->asMovieRoot.get();
+
+								// ROOT CAUSE FIX (bisected 2026-07-22): leaving our
+								// AS3 closure installed as BGSCodeObj.ScrapItem (plus
+								// the stashed native original in bws_origScrapItem)
+								// breaks the menu's native teardown — controls stay
+								// blocked, the workbench screen effect lingers, and
+								// interaction prompts never come back. Confirmed by
+								// bisect: wrap on -> broken exit, wrap off -> healthy.
+								// So put the code object back EXACTLY as the game
+								// built it before teardown runs: restore the original
+								// native ScrapItem and drop our extra member.
+								RE::Scaleform::GFx::Value codeObj;
+								if (root->GetVariable(std::addressof(codeObj), "root.BaseInstance.BGSCodeObj") &&
+									codeObj.IsObject()) {
+									RE::Scaleform::GFx::Value orig;
+									if (codeObj.GetMember("bws_origScrapItem", std::addressof(orig)) &&
+										!orig.IsUndefined()) {
+										codeObj.SetMember("ScrapItem", orig);
+										// No DeleteMember in this GFx wrapper; undefined
+										// releases the held reference, which is what matters.
+										codeObj.SetMember("bws_origScrapItem", RE::Scaleform::GFx::Value{});
+										logger::info("[BWS] ExamineMenu closing: restored native ScrapItem on BGSCodeObj"sv);
+									}
+								}
+
+								const bool unloaded = root->Invoke("root.bws_loader.unload", nullptr, nullptr, 0);
+								logger::info("[BWS] ExamineMenu closing: bws_loader.unload() -> {}"sv, unloaded);
+							}
+						} else {
+							logger::info("[BWS] ExamineMenu closing: menu already gone from map"sv);
+						}
+					}
+					g_exitLookedBroken.store(false, std::memory_order_release);
+
 					g_examineOpen.store(false, std::memory_order_release);
 					g_examineMenuPtr = nullptr;
-					// Leaving the workbench: tear down every BWS UI path and
-					// force-release ControlMap / menuMode. A stuck
-					// ignoreKeyboardMouse or leaked menuMode layer is what
-					// locks all player controls after exiting the bench.
-					{
-						std::uint32_t menuMode = 0;
-						bool         ignore = false;
-						if (auto* ui = RE::UI::GetSingleton()) {
-							menuMode = ui->menuMode;
-						}
-						if (auto* cm = RE::ControlMap::GetSingleton()) {
-							ignore = cm->ignoreKeyboardMouse;
-						}
-						logger::info("[BWS] ExamineMenu closed — releasing input guards (menuMode={} ignoreKeyboardMouse={})"sv,
-							menuMode, ignore);
-					}
+					// Do NOT clear blockPlayerInput here — it is normally true
+					// during this event while ButtonBarMenu finishes teardown.
+					// Clearing it immediately freed WASD but left activate /
+					// interaction prompts hidden for the rest of the session
+					// (verified: ButtonBarMenu still open at this exact moment).
 					CloseFlow();
 					ForceReleaseInputGuardsImpl();
 					ScrapOverlay::ForceDismiss();
 					BWS::ExamineMenuBridge::ClearStagedItems();
-					{
-						std::uint32_t menuMode = 0;
-						bool         ignore = false;
-						if (auto* ui = RE::UI::GetSingleton()) {
-							menuMode = ui->menuMode;
-						}
+
+					std::uint32_t menuMode = 0;
+					bool          ignore = false;
+					bool          blockInput = false;
+					bool          buttonBarOpen = false;
+
+					if (auto* ui = RE::UI::GetSingleton()) {
+						menuMode = ui->menuMode;
+						static const RE::BSFixedString kButtonBar{ "ButtonBarMenu" };
+						buttonBarOpen = ui->GetMenuOpen(kButtonBar);
+					}
+					if (auto* cm = RE::ControlMap::GetSingleton()) {
+						ignore = cm->ignoreKeyboardMouse;
+					}
+					if (auto* pc = RE::PlayerControls::GetSingleton()) {
+						blockInput = pc->blockPlayerInput;
+					}
+
+					logger::info(
+						"[BWS] ExamineMenu closed — menuMode={} ignore={} blockPlayerInput={} "
+						"ButtonBarMenu={} (deferring blockPlayerInput heal)"sv,
+						menuMode, ignore, blockInput, buttonBarOpen);
+
+					if (ignore) {
 						if (auto* cm = RE::ControlMap::GetSingleton()) {
-							ignore = cm->ignoreKeyboardMouse;
-						}
-						if (menuMode > 0 || ignore) {
-							logger::warn("[BWS] after release still menuMode={} ignoreKeyboardMouse={} — may lock controls"sv,
-								menuMode, ignore);
-							// Only force-clear ignore here. Do not touch menuMode:
-							// the close event can race the engine's own decrement,
-							// and stealing its layer corrupts other menus.
-							if (ignore) {
-								if (auto* cm = RE::ControlMap::GetSingleton()) {
-									cm->SetIgnoreKeyboardMouse(false);
-								}
-							}
+							cm->SetIgnoreKeyboardMouse(false);
 						}
 					}
+					if (::GetCapture()) {
+						::ReleaseCapture();
+					}
+
+					LogMenuDiagnostics("close");
+
+					// Arm deferred heal — TickPostExamineInputHeal clears a
+					// stuck blockPlayerInput only after the engine has finished
+					// restoring ButtonBarMenu / activate prompts.
+					g_postExamineHealFrames.store(kPostExamineHealDelayFrames, std::memory_order_release);
+					g_diagRecheckFrames.store(kDiagRecheckDelayFrames, std::memory_order_release);
+
 					spdlog::default_logger()->flush();
 				}
 			}
@@ -1046,6 +1218,98 @@ namespace BWS::ScrapModManager
 	void ForceReleaseInputGuards()
 	{
 		ForceReleaseInputGuardsImpl();
+	}
+
+	void TickPostExamineInputHeal()
+	{
+		// Diagnostic-only recheck, independent of the heal countdown below,
+		// so we can see whether the hidden-UI state ever self-clears.
+		std::uint32_t diagFrames = g_diagRecheckFrames.load(std::memory_order_acquire);
+		if (diagFrames > 0) {
+			if (g_examineOpen.load(std::memory_order_acquire)) {
+				g_diagRecheckFrames.store(0, std::memory_order_release);
+			} else {
+				--diagFrames;
+				g_diagRecheckFrames.store(diagFrames, std::memory_order_release);
+				if (diagFrames == 0) {
+					LogMenuDiagnostics("recheck+3s");
+					// If this exit showed the broken signature (blockPlayerInput
+					// still stuck at heal time), assume ExamineMenu's HUD-mode
+					// pop was skipped too and re-pop it. Restores crosshair /
+					// activate prompts if the stuck-HUD-mode diagnosis is
+					// right; popping an already-popped mode is a no-op
+					// (removes nothing from the mode stack).
+					if (g_exitLookedBroken.load(std::memory_order_acquire) &&
+						!g_examineHudModeStr.empty()) {
+						RE::HUDModeType mode{ RE::BSFixedString(g_examineHudModeStr.c_str()) };
+						PopHUDModeByName(mode);
+						logger::warn("[BWS] recheck: exit looked broken — popped HUD mode '{}' to restore interaction UI"sv,
+							g_examineHudModeStr);
+					}
+					spdlog::default_logger()->flush();
+				}
+			}
+		}
+
+		std::uint32_t frames = g_postExamineHealFrames.load(std::memory_order_acquire);
+		if (frames == 0) {
+			return;
+		}
+		if (g_examineOpen.load(std::memory_order_acquire)) {
+			g_postExamineHealFrames.store(0, std::memory_order_release);
+			return;
+		}
+
+		--frames;
+		g_postExamineHealFrames.store(frames, std::memory_order_release);
+		if (frames > 0) {
+			return;
+		}
+
+		auto* ui = RE::UI::GetSingleton();
+		auto* pc = RE::PlayerControls::GetSingleton();
+		static const RE::BSFixedString kPrompt{ "PromptMenu" };
+		static const RE::BSFixedString kButtonBar{ "ButtonBarMenu" };
+
+		const bool promptOpen = ui && ui->GetMenuOpen(kPrompt);
+		const bool buttonBarOpen = ui && ui->GetMenuOpen(kButtonBar);
+		const bool blocked = pc && pc->blockPlayerInput;
+
+		logger::info(
+			"[BWS] post-Examine heal tick — blockPlayerInput={} PromptMenu={} ButtonBarMenu={}"sv,
+			blocked, promptOpen, buttonBarOpen);
+		LogMenuDiagnostics("heal-tick");
+
+		if (!blocked) {
+			// Controls already free. If FallUI's PromptMenu is still down,
+			// bring it back without touching player input flags.
+			if (ui && !promptOpen) {
+				if (auto* q = RE::UIMessageQueue::GetSingleton()) {
+					q->AddMessage(kPrompt, RE::UI_MESSAGE_TYPE::kShow);
+					logger::warn("[BWS] post-Examine heal: re-showing PromptMenu (controls already free)"sv);
+				}
+			}
+			spdlog::default_logger()->flush();
+			return;
+		}
+
+		// Stuck controls: restore FallUI PromptMenu FIRST, then clear the flag.
+		// Clearing blockPlayerInput alone was leaving activate prompts dead.
+		if (auto* q = RE::UIMessageQueue::GetSingleton()) {
+			if (!promptOpen) {
+				q->AddMessage(kPrompt, RE::UI_MESSAGE_TYPE::kShow);
+				logger::warn("[BWS] post-Examine heal: showing PromptMenu before clearing blockPlayerInput"sv);
+			}
+		}
+
+		// Stuck blockPlayerInput at this point is the reliable marker of a
+		// broken exit — remember it so the +3s recheck can also re-pop the
+		// menu's HUD mode (crosshair / activate prompt restore).
+		g_exitLookedBroken.store(true, std::memory_order_release);
+
+		pc->blockPlayerInput = false;
+		logger::warn("[BWS] post-Examine heal: cleared stuck PlayerControls::blockPlayerInput"sv);
+		spdlog::default_logger()->flush();
 	}
 
 	bool ShouldShowNativeHint()
