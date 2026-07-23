@@ -3,10 +3,29 @@
 #include "PCH.h"
 
 #include <atomic>
+#include <optional>
+
+namespace RE
+{
+	class TESBoundObject;
+	class BGSObjectInstanceExtra;
+}
 
 namespace BWS::ScrapModManager
 {
 	void Install();
+
+	/**
+	 * Index of the stack, within the PLAYER's real BGSInventoryItem for
+	 * a_base, whose BGSObjectInstanceExtra content (the OID mod array)
+	 * exactly matches a_snapshot — the instance ExamineMenu is displaying.
+	 * ExamineMenu::moddedInventoryItem is a snapshot and ExamineMenu::modStack
+	 * proved unreliable as a plain stack index (detach wrote to the wrong
+	 * weapon when two of the same base form were carried), so the stack is
+	 * located by comparing actual instance data instead.
+	 */
+	std::optional<std::uint32_t> FindPlayerStackIndexForInstance(
+		RE::TESBoundObject* a_base, const RE::BGSObjectInstanceExtra* a_snapshot);
 
 	/** Called from HUDMenu PostDisplay after ImGui NewFrame; draws hotkey hint and scrap-mod flow. */
 	void Draw();

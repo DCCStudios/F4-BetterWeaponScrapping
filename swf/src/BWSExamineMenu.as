@@ -73,6 +73,13 @@ package
 		private static const CIRCLE_PAD_X:Number = 3;  // ring padding around key text
 		private static const CIRCLE_PAD_Y:Number = -1;
 		private static const CIRCLE_LINE:Number = 2;
+		// Pad-mode key glyph is smaller than the "SCRAP MODS" label; the
+		// ring is still measured at FONT_SIZE so shrinking L3 doesn't
+		// shrink the circle.
+		private static const KEY_FONT_SIZE:Number = 13;
+		// Pad-mode key sits a hair above the ring's optical center —
+		// TextField glyphs hang slightly low relative to the ellipse.
+		private static const KEY_NUDGE_Y:Number = -0.7;
 
 		public function BWSExamineMenu()
 		{
@@ -275,6 +282,22 @@ package
 			return tf;
 		}
 
+		private function applyKeySize(size:Number):void
+		{
+			if (!keyText)
+			{
+				return;
+			}
+			var fmt:TextFormat = keyText.defaultTextFormat;
+			if (Number(fmt.size) == size)
+			{
+				return;
+			}
+			fmt.size = size;
+			keyText.defaultTextFormat = fmt;
+			keyText.setTextFormat(fmt);
+		}
+
 		// Reproduces Shared.AS3.BSBracketClip's BR_HORIZONTAL path: a short
 		// horizontal tick at each corner joined by a full-height vertical
 		// line on each side — NOT a "[" / "]" font glyph.
@@ -307,8 +330,6 @@ package
 			// of the key text.
 			var ringPad:Number = padActive ? (CIRCLE_PAD_X + CIRCLE_LINE) : 0;
 			keyText.x = PAD_X + BRACKET_LINE_WIDTH + 4 + ringPad;
-			keyText.y = 0;
-			cueText.x = keyText.x + keyText.textWidth + 4 + ringPad + KEY_GAP;
 			cueText.y = 0;
 
 			// TextField metrics: text is inset ~2px from the field origin on
@@ -316,6 +337,10 @@ package
 			keyCircle.graphics.clear();
 			if (padActive)
 			{
+				// Measure the ring at FONT_SIZE first so shrinking the L3
+				// glyph does not shrink the circle, then center the smaller
+				// key inside that fixed ring.
+				applyKeySize(FONT_SIZE);
 				var kw:Number = keyText.textWidth + CIRCLE_PAD_X * 2;
 				var kh:Number = keyText.textHeight + CIRCLE_PAD_Y * 2;
 				// Single letters ("A", "B") should sit in a true circle, not
@@ -325,10 +350,23 @@ package
 					kw = kh;
 				}
 				var kcx:Number = keyText.x + 2 + keyText.textWidth * 0.5;
-				var kcy:Number = keyText.y + 2 + keyText.textHeight * 0.5;
+				var kcy:Number = 2 + keyText.textHeight * 0.5;
+
+				applyKeySize(KEY_FONT_SIZE);
+				keyText.x = kcx - 2 - keyText.textWidth * 0.5;
+				keyText.y = kcy + KEY_NUDGE_Y - 2 - keyText.textHeight * 0.5;
+
 				keyCircle.graphics.lineStyle(
 					CIRCLE_LINE, HUD_GREEN, 1.0, true, "normal", "round");
 				keyCircle.graphics.drawEllipse(kcx - kw * 0.5, kcy - kh * 0.5, kw, kh);
+
+				cueText.x = kcx + kw * 0.5 + KEY_GAP;
+			}
+			else
+			{
+				applyKeySize(FONT_SIZE);
+				keyText.y = 0;
+				cueText.x = keyText.x + keyText.textWidth + 4 + KEY_GAP;
 			}
 
 			var textW:Number = cueText.textWidth + 4;

@@ -44,8 +44,11 @@ struct PendingWeaponScrap
 	// Identify the exact inventory weapon the workbench is examining, so the
 	// "keep weapon" actions can detach its mods in place (ModifyModDataFunctor
 	// on the player's inventory) instead of scrapping. weaponBaseFormID is the
-	// base TESObjectWEAP; modStackID is ExamineMenu::modStack (index of the
-	// stack inside the BGSInventoryItem's linked list).
+	// base TESObjectWEAP; modStackID is the index of the stack inside the
+	// player's BGSInventoryItem linked list, resolved at build time by
+	// content-matching the examined instance data against the player's real
+	// stacks (ExamineMenu::modStack is NOT a plain stack index — see
+	// ScrapModManager::FindPlayerStackIndexForInstance).
 	std::uint32_t weaponBaseFormID{ 0 };
 	std::uint32_t modStackID{ 0 };
 };

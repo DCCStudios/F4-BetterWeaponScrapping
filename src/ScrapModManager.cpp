@@ -173,18 +173,31 @@ namespace
 		return nullptr;
 	}
 
-	std::uint32_t FindStackIndexForExtra(RE::BGSInventoryItem* a_inv, const RE::ExtraDataList* a_target)
+	// Raw ExamineMenu::modStack field. NOTE: verified in-game to NOT be a
+	// plain index into the BGSInventoryItem stack list (detaching still hit
+	// the wrong stack when it was used as one) — kept only as a last-resort
+	// fallback and for diagnostics. The authoritative resolution is
+	// FindPlayerStackIndexForInstance (content match), below.
+	std::uint32_t GetExamineModStackIndex(const RE::ExamineMenu* a_menu)
 	{
-		if (!a_inv || !a_target) {
-			return 0;
+		return *reinterpret_cast<const std::uint32_t*>(
+			reinterpret_cast<const std::byte*>(a_menu) + kExamineMenu_ModStack);
+	}
+
+	// Stack index the examine operations must target: the player stack whose
+	// instance data matches the examined snapshot (see header comment), with
+	// ExamineMenu::modStack as fallback when no content match exists.
+	std::uint32_t ResolveExamineStackIndex(
+		RE::ExamineMenu* a_menu, RE::TESBoundObject* a_base, const RE::BGSObjectInstanceExtra* a_snapshot)
+	{
+		if (const auto match = BWS::ScrapModManager::FindPlayerStackIndexForInstance(a_base, a_snapshot)) {
+			return *match;
 		}
-		std::uint32_t idx = 0;
-		for (auto* stack = a_inv->stackData.get(); stack; stack = stack->nextStack.get(), ++idx) {
-			if (stack->extra.get() == a_target) {
-				return idx;
-			}
-		}
-		return 0;
+		const std::uint32_t fallback = GetExamineModStackIndex(a_menu);
+		logger::warn(
+			"[BWS] ResolveExamineStackIndex: no player stack content-matches the examined instance; falling back to modStack={}"sv,
+			fallback);
+		return fallback;
 	}
 
 	struct ExamineWeaponCtx
@@ -216,7 +229,7 @@ namespace
 		if (!instExtra) {
 			return std::nullopt;
 		}
-		const std::uint32_t stackIdx = FindStackIndexForExtra(invItem, targetExtra);
+		const std::uint32_t stackIdx = ResolveExamineStackIndex(a_menu, weapBase, instExtra);
 		return ExamineWeaponCtx{
 			.player    = player,
 			.weapon    = weapBase,
@@ -229,21 +242,21 @@ namespace
 	bool IsExamineStackEquipped(RE::ExamineMenu* a_menu)
 	{
 		const auto ctxOpt = GetExamineWeaponCtx(a_menu);
-		if (!ctxOpt) {
+		if (!ctxOpt || !ctxOpt->player->inventoryList) {
 			return false;
 		}
-		const auto* targetExtra = GetPrimaryInstanceExtraList(ctxOpt->invItem);
-		if (!targetExtra || !ctxOpt->player->inventoryList) {
-			return false;
-		}
-		bool equipped = false;
+		// Match by stack INDEX (ExamineMenu::modStack), not by comparing the
+		// snapshot's ExtraDataList pointer — moddedInventoryItem is a copy,
+		// so its pointers need not match the player's real stack list.
+		bool          equipped = false;
+		std::uint32_t idx = 0;
 		ctxOpt->player->inventoryList->ForEachStack(
 			[&](RE::BGSInventoryItem& a_item) {
 				return a_item.object == ctxOpt->weapon;
 			},
 			[&](RE::BGSInventoryItem&, RE::BGSInventoryItem::Stack& a_stack) {
-				if (a_stack.extra.get() == targetExtra && a_stack.IsEquipped()) {
-					equipped = true;
+				if (idx++ == ctxOpt->stackIdx) {
+					equipped = a_stack.IsEquipped();
 					return false;
 				}
 				return true;
@@ -737,7 +750,7 @@ namespace
 			return false;
 		}
 
-		const std::uint32_t stackIdx = FindStackIndexForExtra(invItem, targetExtra);
+		const std::uint32_t stackIdx = ResolveExamineStackIndex(a_menu, weapBase, instExtra);
 
 		bool            success = false;
 		RE::BGSInventoryItem::ModifyModDataFunctor modFn(
@@ -749,8 +762,8 @@ namespace
 		player->FindAndWriteStackDataForInventoryItem(weapBase, idFn, modFn);
 
 		if (BWS::Settings::Get().debugLogging.load()) {
-			logger::info("[BWS] ScrapMod: RemoveMod form={:08X} slot={} success={}"sv,
-				a_modFormID, *slotOpt, success);
+			logger::info("[BWS] ScrapMod: RemoveMod form={:08X} slot={} stackIdx={} (modStack field={}) success={}"sv,
+				a_modFormID, *slotOpt, stackIdx, GetExamineModStackIndex(a_menu), success);
 		}
 
 		return success;
@@ -1262,6 +1275,41 @@ namespace
 
 namespace BWS::ScrapModManager
 {
+	std::optional<std::uint32_t> FindPlayerStackIndexForInstance(
+		RE::TESBoundObject* a_base, const RE::BGSObjectInstanceExtra* a_snapshot)
+	{
+		auto* player = RE::PlayerCharacter::GetSingleton();
+		if (!player || !player->inventoryList || !a_base || !a_snapshot) {
+			return std::nullopt;
+		}
+		const auto snap = a_snapshot->GetIndexData();
+
+		std::optional<std::uint32_t> found;
+		std::uint32_t                idx = 0;
+		player->inventoryList->ForEachStack(
+			[&](RE::BGSInventoryItem& a_item) {
+				return a_item.object == a_base;
+			},
+			[&](RE::BGSInventoryItem&, RE::BGSInventoryItem::Stack& a_stack) {
+				const std::uint32_t thisIdx = idx++;
+				const auto*         xList = a_stack.extra.get();
+				const auto*         inst = xList ? xList->GetByType<RE::BGSObjectInstanceExtra>() : nullptr;
+				if (inst) {
+					const auto data = inst->GetIndexData();
+					// Exact content match: same OID entries in the same order
+					// (ObjectIndexData is a POD of objectID/index/rank/disabled,
+					// so a byte compare of the spans is a full equality check).
+					if (data.size() == snap.size() &&
+						std::memcmp(data.data(), snap.data(), data.size_bytes()) == 0) {
+						found = thisIdx;
+						return false;
+					}
+				}
+				return true;
+			});
+		return found;
+	}
+
 	void Install()
 	{
 		static std::atomic<bool> s_registered{ false };
@@ -1493,6 +1541,14 @@ namespace BWS::ScrapModManager
 			nullptr,
 			ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
 				ImGuiWindowFlags_AlwaysAutoResize);
+
+		// True while gamepad/keyboard nav focus sits INSIDE one of this
+		// window's child lists (mod list, swap list, ...). ImGui's built-in
+		// nav-cancel (B) already pops focus from a child back to the parent
+		// window — our own B handler below must stay quiet on that press,
+		// otherwise one press would exit the list AND back out of the menu.
+		const bool navInChildList =
+			ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) && !ImGui::IsWindowFocused();
 
 		const float listH = std::min(std::round(400.0f * sc), io.DisplaySize.y * 0.45f);
 		const float swapH = std::min(std::round(240.0f * sc), io.DisplaySize.y * 0.3f);
@@ -1765,8 +1821,10 @@ namespace BWS::ScrapModManager
 
 		// Gamepad B (or keyboard Backspace via ImGui nav) = back one step /
 		// close, mirroring the on-screen Back/Close buttons so a controller
-		// never gets stuck in the flow.
-		if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) {
+		// never gets stuck in the flow. Skipped while nav focus is inside a
+		// child list: that press only pops focus back to this window (ImGui
+		// built-in); the NEXT press backs out of the phase / closes.
+		if (!navInChildList && ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) {
 			switch (phase) {
 			case FlowPhase::kConfirm:
 			case FlowPhase::kSwapSuggest:

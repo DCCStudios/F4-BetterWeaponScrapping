@@ -2,6 +2,7 @@
 #include "BenchScrapTypes.h"
 #include "ExamineMenuBridge.h"
 #include "ScrapManager.h"
+#include "ScrapModManager.h"
 #include "ScrapOverlay.h"
 #include "Settings.h"
 
@@ -233,10 +234,25 @@ namespace
 		}
 
 		// Identify the exact inventory weapon/stack for the "keep weapon"
-		// detach actions (see PendingWeaponScrap comments).
+		// detach actions (see PendingWeaponScrap comments). The stack index is
+		// resolved by matching the snapshot's instance data against the
+		// player's real stacks — ExamineMenu::modStack is not a plain stack
+		// index (using it detached mods from the wrong weapon when two of the
+		// same base form were carried), so it is only the fallback here.
 		a_out.weaponBaseFormID = static_cast<std::uint32_t>(weap->GetFormID());
 		a_out.modStackID = *reinterpret_cast<const std::uint32_t*>(
 			reinterpret_cast<const std::byte*>(a_menu) + kExamineMenu_ModStack);
+		if (const auto* snapStack = invItem->stackData.get()) {
+			const auto* xList = snapStack->extra.get();
+			const auto* inst = xList ? xList->GetByType<RE::BGSObjectInstanceExtra>() : nullptr;
+			if (const auto match = BWS::ScrapModManager::FindPlayerStackIndexForInstance(weap, inst)) {
+				a_out.modStackID = *match;
+			} else {
+				logger::warn(
+					"[BWS] BuildPending: no player stack content-matches the examined instance; using modStack={}"sv,
+					a_out.modStackID);
+			}
+		}
 
 		CollectWeaponModsFromInventory(weap, invItem, a_out.mods);
 

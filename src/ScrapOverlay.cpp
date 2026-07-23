@@ -1092,6 +1092,14 @@ namespace
 			ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
 				ImGuiWindowFlags_AlwaysAutoResize);
 
+		// True while gamepad/keyboard nav focus sits INSIDE one of this
+		// window's child lists (mod checkboxes, tally list). ImGui's built-in
+		// nav-cancel (B) already pops focus from a child back to the parent
+		// window — the B-dismiss handler below must stay quiet on that press,
+		// otherwise one press would exit the list AND close the popup.
+		const bool navInChildList =
+			ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) && !ImGui::IsWindowFocused();
+
 		if (g_preScrapMode) {
 			ImGui::TextUnformatted("Scrap Weapon \xe2\x80\x94 Recovery Options");
 		} else {
@@ -1296,8 +1304,10 @@ namespace
 		}
 
 		// Gamepad B = dismiss (same as Cancel/Skip). In pre-scrap mode the
-		// weapon is untouched, so closing is always safe.
-		if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) {
+		// weapon is untouched, so closing is always safe. Skipped while nav
+		// focus is inside a child list: that press only pops focus back to
+		// this window (ImGui built-in); the NEXT press dismisses.
+		if (!navInChildList && ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) {
 			DismissPopup();
 		}
 
