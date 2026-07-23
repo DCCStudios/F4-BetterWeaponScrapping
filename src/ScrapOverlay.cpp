@@ -1112,7 +1112,10 @@ namespace
 
 		if (!g_active.mods.empty()) {
 			ImGui::TextUnformatted("Attached mods:");
-			ImGui::TextDisabled("Checked = recover as loose item. Unchecked = scrap for crafting components.");
+			// Full-brightness text, not TextDisabled's 50%-dim variant: this
+			// line explains the checkbox rule and was hard to read at the
+			// dimmed disabled-text alpha against the HUD background.
+			ImGui::TextWrapped("Checked = scrap for crafting components. Unchecked = recover as loose item.");
 			ImGui::Spacing();
 			const float modLineH = ImGui::GetTextLineHeightWithSpacing();
 			const float modsDesiredH =
@@ -1125,11 +1128,15 @@ namespace
 				ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding);
 			for (std::size_t i = 0; i < g_active.mods.size(); ++i) {
 				const char* label = g_active.mods[i].label.empty() ? "(mod)" : g_active.mods[i].label.c_str();
-				bool        sel = g_modSelected[i] != 0;
+				// g_modSelected[i] != 0 means "recover as loose item" throughout
+				// the rest of this file (tally, CollectSelectedRecoveryItems).
+				// The checkbox itself now shows the inverse ("checked = scrap")
+				// per user preference, so invert on the way in and out here only.
+				bool scrapChecked = g_modSelected[i] == 0;
 				ImGui::PushID(static_cast<int>(i));
-				ImGui::Checkbox(label, &sel);
+				ImGui::Checkbox(label, &scrapChecked);
 				ImGui::PopID();
-				g_modSelected[i] = sel ? 1 : 0;
+				g_modSelected[i] = scrapChecked ? 0 : 1;
 			}
 			ImGui::EndChild();
 			ImGui::Spacing();
